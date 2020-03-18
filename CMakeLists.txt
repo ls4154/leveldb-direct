@@ -196,8 +196,8 @@ if (WIN32)
 else (WIN32)
   target_sources(leveldb
     PRIVATE
-      "${PROJECT_SOURCE_DIR}/util/env_posix.cc"
-      "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
+      "${PROJECT_SOURCE_DIR}/util/env_raw.cc"
+      "${PROJECT_SOURCE_DIR}/util/raw_logger.h"
   )
 endif (WIN32)
 
