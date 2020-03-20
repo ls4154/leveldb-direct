@@ -17,9 +17,9 @@ namespace leveldb {
 
 class RawLogger final : public Logger {
  public:
-  explicit RawLogger(std::FILE* fp) : fp_(fp) { assert(fp != nullptr); }
+  explicit RawLogger(std::FILE* fp) : fp_(fp) {}
 
-  ~RawLogger() override { std::fclose(fp_); }
+  ~RawLogger() override {}
 
   void Logv(const char* format, va_list arguments) override {
     std::va_list arguments_copy;
