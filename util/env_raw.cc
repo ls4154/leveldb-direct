@@ -11,6 +11,8 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
 
 #include <atomic>
 #include <cerrno>
@@ -334,8 +336,8 @@ class PosixEnv : public Env {
                            SequentialFile** result) override {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_)
+      fptr = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_)
           + BLK_SIZE * file_table_[filename]);
     } else {
       return PosixError(filename, ENOENT);
@@ -348,8 +350,8 @@ class PosixEnv : public Env {
                              RandomAccessFile** result) override {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_)
+      fptr = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_)
           + BLK_SIZE * file_table_[filename]);
     } else {
       return PosixError(filename, ENOENT);
@@ -362,14 +364,14 @@ class PosixEnv : public Env {
                          WritableFile** result) override {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_)
+      fptr = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_)
           + BLK_SIZE * file_table_[filename]);
       fptr->f_size = 0; // delete if exists
     } else {
       file_table_.insert({filename, free_idx_++});
-      fptr = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_)
+      fptr = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_)
           + BLK_SIZE * file_table_[filename]);
       strcpy(fptr->f_name, filename.c_str());
       fptr->f_name_len = filename.size();
@@ -384,13 +386,13 @@ class PosixEnv : public Env {
                            WritableFile** result) override {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_)
+      fptr = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_)
           + BLK_SIZE * file_table_[filename]);
     } else {
       file_table_.insert({filename, free_idx_++});
-      fptr = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_)
+      fptr = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_)
           + BLK_SIZE * file_table_[filename]);
       strcpy(fptr->f_name, filename.c_str());
       fptr->f_name_len = filename.size();
@@ -421,8 +423,8 @@ class PosixEnv : public Env {
       return PosixError(filename, ENOENT);
     }
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile *>(
-        static_cast<char *>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
+    fptr = reinterpret_cast<struct RawFile*>(
+        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
     fptr->f_type = FTYPE_FREE;
     file_table_.erase(filename);
 
@@ -442,8 +444,8 @@ class PosixEnv : public Env {
       return PosixError(filename, ENOENT);
     }
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile *>(
-        static_cast<char *>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
+    fptr = reinterpret_cast<struct RawFile*>(
+        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
     *size = fptr->f_size;
     return Status::OK();
   }
@@ -453,13 +455,13 @@ class PosixEnv : public Env {
       return PosixError(from, ENOENT);
     }
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile *>(
-        static_cast<char *>(dev_mmap_base_) + BLK_SIZE * file_table_[from]);
+    fptr = reinterpret_cast<struct RawFile*>(
+        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[from]);
 
     if (file_table_.count(to)) {
       struct RawFile *fptr2;
-      fptr2 = reinterpret_cast<struct RawFile *>(
-          static_cast<char *>(dev_mmap_base_) + BLK_SIZE * file_table_[to]);
+      fptr2 = reinterpret_cast<struct RawFile*>(
+          static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[to]);
       fptr2->f_type = FTYPE_FREE;
       file_table_.erase(to);
     }
@@ -554,26 +556,49 @@ class PosixEnv : public Env {
 PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false) {
+  bool real_dev = false;
   dev_size_ = FS_SIZE;
-  dev_fd_ = open("ldb.raw", O_RDWR | O_CREAT, 0644);
+  dev_fd_ = open("/dev/sda1", O_RDWR | O_CREAT, 0644);
   if (dev_fd_ == -1) {
     perror("open ldb");
     exit(1);
   }
-  if (ftruncate(dev_fd_, dev_size_) == -1) {
-    perror("ftruncate");
+  struct stat sts;
+  if (fstat(dev_fd_, &sts) == -1) {
+    perror("fstat");
     exit(1);
   }
-  dev_mmap_base_ = mmap(nullptr, dev_size_, PROT_READ | PROT_WRITE, MAP_SHARED, dev_fd_, 0);
+  if ((sts.st_mode & S_IFMT) == S_IFREG) {
+    if (ftruncate(dev_fd_, dev_size_) == -1) {
+      perror("ftruncate");
+      exit(1);
+    }
+  } else if ((sts.st_mode & S_IFMT) == S_IFBLK) {
+    int nblk;
+    int sectsize;
+    ioctl(dev_fd_, BLKGETSIZE, &nblk);
+    ioctl(dev_fd_, BLKSSZGET, &sectsize);
+    real_dev = true;
+    if (1ULL * sectsize * nblk < FS_SIZE) {
+      fprintf(stderr, "device too small\n");
+      exit(1);
+    }
+  } else {
+    fprintf(stderr, "wrong file type\n");
+    exit(1);
+  }
+  dev_mmap_base_ = mmap(nullptr, dev_size_, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        dev_fd_, 0);
   if (dev_mmap_base_ == MAP_FAILED) {
     perror("mmap");
     exit(1);
   }
   free_idx_ = 0;
-  sb_ptr_ = static_cast<struct SuperBlock *>(dev_mmap_base_);
+  sb_ptr_ = static_cast<struct SuperBlock*>(dev_mmap_base_);
   if (sb_ptr_->sb_magic == LDBFS_MAGIC) {
     for (int i = 1; i < BLK_CNT; i++) {
-      struct RawFile *fptr = reinterpret_cast<struct RawFile *>(static_cast<char *>(dev_mmap_base_) + BLK_SIZE * i);
+      struct RawFile *fptr = reinterpret_cast<struct RawFile*>(
+                             static_cast<char*>(dev_mmap_base_) + BLK_SIZE * i);
       switch (fptr->f_type) {
         case FTYPE_FREE:
           if (free_idx_ == 0) {
@@ -590,6 +615,13 @@ PosixEnv::PosixEnv()
       }
     }
   } else {
+    if (real_dev) {
+      for (int i = 1; i < BLK_CNT; i++) {
+        struct RawFile *fptr = reinterpret_cast<struct RawFile*>(
+                               static_cast<char*>(dev_mmap_base_) + BLK_SIZE * i);
+        fptr->f_type = FTYPE_FREE;
+      }
+    }
     sb_ptr_->sb_magic = LDBFS_MAGIC;
     free_idx_ = 1;
   }
