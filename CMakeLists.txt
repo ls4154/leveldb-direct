@@ -275,7 +275,7 @@ target_link_libraries(leveldb
   dpdk rte_bus_pci rte_bus_vdev rte_cmdline rte_compressdev rte_cryptodev rte_eal rte_ethdev
   rte_fib rte_hash rte_kvargs rte_mbuf rte_mempool rte_mempool_bucket rte_mempool_ring rte_meter
   rte_net rte_pci rte_rib rte_ring rte_vhost
-  numa dl
+  numa dl uuid
 )
 
 if(LEVELDB_BUILD_TESTS)

@@ -81,7 +81,7 @@ void register_ns(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_ns* ns)
   if (!spdk_nvme_ns_is_active(ns))
     return;
 
-  entry = static_cast<ctrlr_entry*>(malloc(sizeof(struct ns_entry)));
+  entry = static_cast<ns_entry*>(malloc(sizeof(struct ns_entry)));
   if (entry == NULL) {
     perror("ns_entry malloc");
     exit(1);
