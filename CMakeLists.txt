@@ -87,6 +87,12 @@ configure_file(
 include_directories(
   "${PROJECT_BINARY_DIR}/include"
   "${PROJECT_SOURCE_DIR}"
+  "../spdk/include"
+)
+
+link_directories(
+  "../spdk/build/lib"
+  "../spdk/dpdk/build/lib"
 )
 
 if(BUILD_SHARED_LIBS)
@@ -263,6 +269,14 @@ add_executable(leveldbutil
   "${PROJECT_SOURCE_DIR}/db/leveldbutil.cc"
 )
 target_link_libraries(leveldbutil leveldb)
+
+target_link_libraries(leveldb
+  spdk_nvme spdk_thread spdk_util spdk_log spdk_sock spdk_vmd spdk_env_dpdk
+  dpdk rte_bus_pci rte_bus_vdev rte_cmdline rte_compressdev rte_cryptodev rte_eal rte_ethdev
+  rte_fib rte_hash rte_kvargs rte_mbuf rte_mempool rte_mempool_bucket rte_mempool_ring rte_meter
+  rte_net rte_pci rte_rib rte_ring rte_vhost
+  numa dl
+)
 
 if(LEVELDB_BUILD_TESTS)
   enable_testing()
