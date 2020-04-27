@@ -291,11 +291,27 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  public:
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
-  PosixRandomAccessFile(std::string filename, RawFile *file_ptr)
-      : filename_(std::move(filename)), file_ptr_(file_ptr) {
+  PosixRandomAccessFile(std::string filename, char* file_buf, uint32_t idx)
+      : filename_(std::move(filename)), buf_(file_buf), idx_(idx) {
+    int rc;
+    int compl_status = 0;
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, buf_,
+                           g_sect_per_blk * idx_, g_sect_per_blk,
+                           read_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk read failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
+    g_ns_mtx.Unlock();
   }
 
-  ~PosixRandomAccessFile() override {}
+  ~PosixRandomAccessFile() override {
+    spdk_free(buf_);
+  }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
@@ -313,7 +329,9 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  private:
   const std::string filename_;
 
+  char* buf_;
   RawFile *file_ptr_;
+  uint32_t idx_;
 };
 
 class PosixWritableFile final : public WritableFile {
@@ -495,15 +513,21 @@ class PosixEnv : public Env {
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
-    struct RawFile *fptr;
+    char* fbuf;
+    uint32_t idx;
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(NULL)
-          + BLK_SIZE * file_table_[filename]);
+      fbuf = static_cast<char*>(
+                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+      if (fbuf == NULL) {
+        fprintf(stderr, "SeqFile zmalloc failed\n");
+        exit(1);
+      }
+      idx = file_table_[filename];
     } else {
       return PosixError(filename, ENOENT);
     }
-    *result = new PosixRandomAccessFile(filename, fptr);
+    *result = new PosixRandomAccessFile(filename, fbuf, idx);
     return Status::OK();
   }
 
