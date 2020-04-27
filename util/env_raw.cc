@@ -528,6 +528,7 @@ class PosixEnv : public Env {
                            SequentialFile** result) override {
     char* fbuf;
     uint32_t idx;
+    fprintf(stderr, "NewSequentialFile %s\n", filename.c_str());
     if (file_table_.count(filename)) {
       fbuf = static_cast<char*>(
                     spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
@@ -548,6 +549,7 @@ class PosixEnv : public Env {
                              RandomAccessFile** result) override {
     char* fbuf;
     uint32_t idx;
+    fprintf(stderr, "NewRandomFile %s\n", filename.c_str());
     if (file_table_.count(filename)) {
       fbuf = static_cast<char*>(
                     spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
@@ -568,6 +570,7 @@ class PosixEnv : public Env {
                          WritableFile** result) override {
     char* fbuf;
     uint32_t idx;
+    fprintf(stderr, "NewWriteFile %s\n", filename.c_str());
     fbuf = static_cast<char*>(
         spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
           SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
@@ -585,6 +588,7 @@ class PosixEnv : public Env {
                            WritableFile** result) override {
     char* fbuf;
     uint32_t idx;
+    fprintf(stderr, "NewAppendFile %s\n", filename.c_str());
     fbuf = static_cast<char*>(
         spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
           SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
@@ -620,6 +624,8 @@ class PosixEnv : public Env {
     char* fbuf;
     int idx;
     struct RawFile *fptr;
+
+    fprintf(stderr, "DeleteFile %s\n", filename.c_str());
 
     if (!file_table_.count(filename))
       return PosixError(filename, ENOENT);
@@ -665,6 +671,9 @@ class PosixEnv : public Env {
     int compl_status = 0;
     char* fbuf;
     struct RawFile *fptr;
+
+    fprintf(stderr, "GetSize %s\n", filename.c_str());
+
     if (!file_table_.count(filename))
       return PosixError(filename, ENOENT);
 
@@ -702,6 +711,8 @@ class PosixEnv : public Env {
     char* fbuf;
     int idx;
     struct RawFile *fptr;
+
+    fprintf(stderr, "Rename %s %s\n", from.c_str(), to.c_str());
 
     if (!file_table_.count(from))
       return PosixError(from, ENOENT);
