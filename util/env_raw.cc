@@ -66,6 +66,7 @@ struct ctrlr_entry* g_controllers = NULL;
 struct ns_entry* g_namespaces = NULL;
 struct port::Mutex g_ns_mtx;
 int g_sectsize;
+int g_nsect;
 int g_sect_per_blk;
 char* g_spdkbuf;
 
@@ -712,9 +713,12 @@ PosixEnv::PosixEnv()
   }
 
   g_sectsize = spdk_nvme_ns_get_sector_size(ns_ent->ns);
+  g_nsect = spdk_nvme_ns_get_num_sectors(ns_ent->ns);
   fprintf(stderr, "nvme sector size %d\n", g_sectsize);
+  fprintf(stderr, "nvme ns sector count %d\n", g_nsect);
   assert(BLK_SIZE % g_sectsize == 0);
   g_sect_per_blk = BLK_SIZE / g_sectsize;
+  fprintf(stderr, "sectors per block %d\n", g_sect_per_blk);
 
   g_spdkbuf = static_cast<char*>(
                   spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
@@ -728,7 +732,7 @@ PosixEnv::PosixEnv()
                              0, g_sect_per_blk,
                              read_complete, &compl_status, 0);
   if (rc != 0) {
-    fprintf(stderr, "spdk_read failed\n");
+    fprintf(stderr, "spdk read failed\n");
     exit(1);
   }
 
@@ -789,11 +793,12 @@ PosixEnv::PosixEnv()
     fptr->f_name_len = 0;
     fptr->f_name[0] = '\0';
     for (int i = 1; i < BLK_CNT; i++) {
+      fprintf(stderr, "write blk %d\n", i);
       rc = spdk_nvme_ns_cmd_write(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
                                  g_sect_per_blk * i, g_sect_per_blk,
                                  write_complete, &compl_status, 0);
       if (rc != 0) {
-        fprintf(stderr, "spdk_read failed\n");
+        fprintf(stderr, "spdk write failed\n");
         exit(1);
       }
       while (!compl_status)
