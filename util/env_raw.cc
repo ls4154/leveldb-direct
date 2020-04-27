@@ -946,6 +946,7 @@ PosixEnv::PosixEnv()
     fptr->f_name[0] = '\0';
     for (int i = 1; i < BLK_CNT; i++) {
       fprintf(stderr, "write blk %d\n", i);
+      compl_status = 0;
       rc = spdk_nvme_ns_cmd_write(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
                                  g_sect_per_blk * i, g_sect_per_blk,
                                  write_complete, &compl_status, 0);
