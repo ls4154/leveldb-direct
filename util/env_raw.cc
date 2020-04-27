@@ -250,8 +250,8 @@ class PosixSequentialFile final : public SequentialFile {
     }
     while (!compl_status)
       spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
     g_ns_mtx.Unlock();
+    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
   }
   ~PosixSequentialFile() override {
     spdk_free(buf_);
@@ -305,8 +305,8 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
     while (!compl_status)
       spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
     g_ns_mtx.Unlock();
+    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
   }
 
   ~PosixRandomAccessFile() override {
@@ -336,16 +336,52 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 
 class PosixWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, RawFile *file_ptr)
-      : pos_(0),
-        is_manifest_(IsManifest(filename)),
+  PosixWritableFile(std::string filename, char* file_buf, uint32_t idx, bool truncate)
+      : is_manifest_(IsManifest(filename)),
         filename_(filename),
-        file_ptr_(file_ptr),
+        buf_(file_buf),
+        idx_(idx),
         dirname_(Dirname(filename_)) {
-    offset_ = file_ptr->f_size;
+    int rc;
+    int compl_status = 0;
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, buf_,
+                           g_sect_per_blk * idx_, g_sect_per_blk,
+                           read_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk read failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    g_ns_mtx.Unlock();
+    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
+
+    strcpy(file_ptr_->f_name, filename_.c_str());
+    file_ptr_->f_name_len = filename.size();
+    if (truncate)
+      file_ptr_->f_size = 0;
+    file_ptr_->f_type = FTYPE_REG;
+    offset_ = file_ptr_->f_size;
   }
 
   ~PosixWritableFile() override {
+    int rc;
+    int compl_status = 0;
+
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, buf_,
+                           g_sect_per_blk * idx_, g_sect_per_blk,
+                           write_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk write failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    g_ns_mtx.Unlock();
+
+    spdk_free(buf_);
   }
 
   Status Append(const Slice& data) override {
@@ -370,7 +406,6 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status Sync() override {
-    msync(file_ptr_->f_payload, file_ptr_->f_size, MS_SYNC);
     return Status::OK();
   }
 
@@ -419,16 +454,14 @@ class PosixWritableFile final : public WritableFile {
     return Basename(filename).starts_with("MANIFEST");
   }
 
-  // buf_[0, pos_ - 1] contains data to be written to fd_.
-  char buf_[kWritableFileBufferSize];
-  size_t pos_;
-
   const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
   const std::string dirname_;  // The directory of filename_.
 
+  char* buf_;
   RawFile *file_ptr_;
   off_t offset_;
+  uint32_t idx_;
 };
 
 int LockOrUnlock(int fd, bool lock) {
@@ -520,7 +553,7 @@ class PosixEnv : public Env {
                     spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
                                  SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
-        fprintf(stderr, "SeqFile zmalloc failed\n");
+        fprintf(stderr, "RandFile zmalloc failed\n");
         exit(1);
       }
       idx = file_table_[filename];
@@ -533,44 +566,36 @@ class PosixEnv : public Env {
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    struct RawFile *fptr;
-    if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(NULL)
-          + BLK_SIZE * file_table_[filename]);
-      fptr->f_size = 0; // delete if exists
-    } else {
-      file_table_.insert({filename, free_idx_++});
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(NULL)
-          + BLK_SIZE * file_table_[filename]);
-      strcpy(fptr->f_name, filename.c_str());
-      fptr->f_name_len = filename.size();
-      fptr->f_size = 0;
-      fptr->f_type = FTYPE_REG;
+    char* fbuf;
+    uint32_t idx;
+    fbuf = static_cast<char*>(
+        spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+          SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "WriteFile zmalloc failed\n");
+      exit(1);
     }
-    *result = new PosixWritableFile(filename, fptr);
+    if (!file_table_.count(filename))
+      file_table_.insert({filename, free_idx_++});
+    *result = new PosixWritableFile(filename, fbuf, file_table_[filename], true);
     return Status::OK();
   }
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    struct RawFile *fptr;
-    if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(NULL)
-          + BLK_SIZE * file_table_[filename]);
-    } else {
-      file_table_.insert({filename, free_idx_++});
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(NULL)
-          + BLK_SIZE * file_table_[filename]);
-      strcpy(fptr->f_name, filename.c_str());
-      fptr->f_name_len = filename.size();
-      fptr->f_size = 0;
-      fptr->f_type = FTYPE_REG;
+    char* fbuf;
+    uint32_t idx;
+    fbuf = static_cast<char*>(
+        spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+          SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "AppendFile zmalloc failed\n");
+      exit(1);
     }
-    *result = new PosixWritableFile(filename, fptr);
+
+    if (!file_table_.count(filename))
+      file_table_.insert({filename, free_idx_++});
+    *result = new PosixWritableFile(filename, fbuf, file_table_[filename], false);
     return Status::OK();
   }
 
@@ -590,13 +615,37 @@ class PosixEnv : public Env {
   }
 
   Status DeleteFile(const std::string& filename) override {
-    if (!file_table_.count(filename)) {
-      return PosixError(filename, ENOENT);
-    }
+    int rc;
+    int compl_status = 0;
+    char* fbuf;
+    int idx;
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(NULL) + BLK_SIZE * file_table_[filename]);
+
+    if (!file_table_.count(filename))
+      return PosixError(filename, ENOENT);
+
+    idx = file_table_[filename];
+    fbuf = static_cast<char*>(
+                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "DelFile zmalloc failed\n");
+      exit(1);
+    }
+    fptr = reinterpret_cast<RawFile*>(fbuf);
     fptr->f_type = FTYPE_FREE;
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, fbuf,
+                           g_sect_per_blk * idx, g_sect_per_blk,
+                           write_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk write failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    g_ns_mtx.Unlock();
+
     file_table_.erase(filename);
 
     return Status::OK();
@@ -611,37 +660,92 @@ class PosixEnv : public Env {
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
-    if (!file_table_.count(filename)) {
-      return PosixError(filename, ENOENT);
-    }
+    int idx;
+    int rc;
+    int compl_status = 0;
+    char* fbuf;
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(NULL) + BLK_SIZE * file_table_[filename]);
+    if (!file_table_.count(filename))
+      return PosixError(filename, ENOENT);
+
+    idx = file_table_[filename];
+
+    fbuf = static_cast<char*>(
+                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "GetFsize zmalloc failed\n");
+      exit(1);
+    }
+
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, fbuf,
+                           g_sect_per_blk * idx, g_sect_per_blk,
+                           read_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk read failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    g_ns_mtx.Unlock();
+
+    fptr = reinterpret_cast<struct RawFile*>(fbuf);
+
     *size = fptr->f_size;
     return Status::OK();
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
-    if (!file_table_.count(from)) {
-      return PosixError(from, ENOENT);
-    }
+    int rc;
+    int compl_status = 0;
+    char* fbuf;
+    int idx;
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(NULL) + BLK_SIZE * file_table_[from]);
 
-    if (file_table_.count(to)) {
-      struct RawFile *fptr2;
-      fptr2 = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(NULL) + BLK_SIZE * file_table_[to]);
-      fptr2->f_type = FTYPE_FREE;
-      file_table_.erase(to);
+    if (!file_table_.count(from))
+      return PosixError(from, ENOENT);
+
+    DeleteFile(to);
+
+    idx = file_table_[from];
+    fbuf = static_cast<char*>(
+                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "Rename zmalloc failed\n");
+      exit(1);
     }
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, fbuf,
+                           g_sect_per_blk * idx, g_sect_per_blk,
+                           read_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk read failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    g_ns_mtx.Unlock();
+
+    fptr = reinterpret_cast<struct RawFile*>(fbuf);
+    strcpy(fptr->f_name, to.c_str());
+    fptr->f_name_len = to.size();
+
+    g_ns_mtx.Lock();
+    spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, fbuf,
+                           g_sect_per_blk * idx, g_sect_per_blk,
+                           write_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk write failed\n");
+      exit(1);
+    }
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    g_ns_mtx.Unlock();
 
     file_table_[to] = file_table_[from];
     file_table_.erase(from);
-
-    strcpy(fptr->f_name, to.c_str());
-    fptr->f_name_len = to.size();
 
     return Status::OK();
   }
