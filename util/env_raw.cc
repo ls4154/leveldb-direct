@@ -733,6 +733,7 @@ class PosixEnv : public Env {
     fptr->f_name_len = to.size();
 
     g_ns_mtx.Lock();
+    compl_status = 0;
     spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, fbuf,
                            g_sect_per_blk * idx, g_sect_per_blk,
                            write_complete, &compl_status, 0);
