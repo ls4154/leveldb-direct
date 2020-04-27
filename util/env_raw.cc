@@ -64,6 +64,10 @@ struct ns_entry {
 
 struct ctrlr_entry* g_controllers = NULL;
 struct ns_entry* g_namespaces = NULL;
+struct port::Mutex g_ns_mtx;
+int g_sectsize;
+int g_sect_per_blk;
+char* g_spdkbuf;
 
 bool g_vmd = false;
 
@@ -145,16 +149,30 @@ void cleanup(void)
   }
 }
 
+void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
+{
+  int* st = static_cast<int*>(arg);
+  *st = 1;
+  if (spdk_nvme_cpl_is_error(completion)) {
+    fprintf(stderr, "spdk write cpl error\n");
+    *st = 2;
+  }
+}
+
+void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
+{
+  int* st = static_cast<int*>(arg);
+  *st = 1;
+  if (spdk_nvme_cpl_is_error(completion)) {
+    fprintf(stderr, "spdk read cpl error\n");
+    *st = 2;
+  }
+}
+
 namespace {
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
-
-// Up to 1000 mmap regions for 64-bit binaries; none for 32-bit.
-constexpr const int kDefaultMmapLimit = (sizeof(void*) >= 8) ? 1000 : 0;
-
-// Can be set using EnvPosixTestHelper::SetReadOnlyMMapLimit.
-int g_mmap_limit = kDefaultMmapLimit;
 
 constexpr const size_t kWritableFileBufferSize = 65536;
 
@@ -166,13 +184,13 @@ Status PosixError(const std::string& context, int error_number) {
   }
 }
 #define LDBFS_MAGIC 0x1234567890abcdefull
-#define BLK_SIZE (16ULL * 1024 * 1024)
-#define BLK_CNT (4096)
+#define BLK_SIZE (8ULL * 1024 * 1024)
+#define BLK_CNT (1024)
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 
-#define MAX_PAYLOAD (BLK_SIZE - 32 - 1024)
-
-#define MAX_NAMELEN 1024
+#define BLK_META_SIZE (8 * 4)
+#define MAX_NAMELEN (1024 - BLK_META_SIZE)
+#define MAX_PAYLOAD (BLK_SIZE - 1024)
 
 struct SuperBlock {
     uint64_t sb_magic;
@@ -441,7 +459,7 @@ class PosixEnv : public Env {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
       fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
+          static_cast<char*>(NULL)
           + BLK_SIZE * file_table_[filename]);
     } else {
       return PosixError(filename, ENOENT);
@@ -455,7 +473,7 @@ class PosixEnv : public Env {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
       fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
+          static_cast<char*>(NULL)
           + BLK_SIZE * file_table_[filename]);
     } else {
       return PosixError(filename, ENOENT);
@@ -469,13 +487,13 @@ class PosixEnv : public Env {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
       fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
+          static_cast<char*>(NULL)
           + BLK_SIZE * file_table_[filename]);
       fptr->f_size = 0; // delete if exists
     } else {
       file_table_.insert({filename, free_idx_++});
       fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
+          static_cast<char*>(NULL)
           + BLK_SIZE * file_table_[filename]);
       strcpy(fptr->f_name, filename.c_str());
       fptr->f_name_len = filename.size();
@@ -491,12 +509,12 @@ class PosixEnv : public Env {
     struct RawFile *fptr;
     if (file_table_.count(filename)) {
       fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
+          static_cast<char*>(NULL)
           + BLK_SIZE * file_table_[filename]);
     } else {
       file_table_.insert({filename, free_idx_++});
       fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
+          static_cast<char*>(NULL)
           + BLK_SIZE * file_table_[filename]);
       strcpy(fptr->f_name, filename.c_str());
       fptr->f_name_len = filename.size();
@@ -528,7 +546,7 @@ class PosixEnv : public Env {
     }
     struct RawFile *fptr;
     fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
+        static_cast<char*>(NULL) + BLK_SIZE * file_table_[filename]);
     fptr->f_type = FTYPE_FREE;
     file_table_.erase(filename);
 
@@ -549,7 +567,7 @@ class PosixEnv : public Env {
     }
     struct RawFile *fptr;
     fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
+        static_cast<char*>(NULL) + BLK_SIZE * file_table_[filename]);
     *size = fptr->f_size;
     return Status::OK();
   }
@@ -560,12 +578,12 @@ class PosixEnv : public Env {
     }
     struct RawFile *fptr;
     fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[from]);
+        static_cast<char*>(NULL) + BLK_SIZE * file_table_[from]);
 
     if (file_table_.count(to)) {
       struct RawFile *fptr2;
       fptr2 = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[to]);
+          static_cast<char*>(NULL) + BLK_SIZE * file_table_[to]);
       fptr2->f_type = FTYPE_FREE;
       file_table_.erase(to);
     }
@@ -647,12 +665,9 @@ class PosixEnv : public Env {
 
   PosixLockTable locks_;  // Thread-safe.
 
-  int dev_fd_;
   uint64_t dev_size_;
-  void* dev_mmap_base_;
   std::map<std::string, uint64_t> file_table_;
   int free_idx_;
-  struct SuperBlock *sb_ptr_;
 };
 
 }  // namespace
@@ -664,6 +679,7 @@ PosixEnv::PosixEnv()
   int rc;
   struct spdk_env_opts opts;
 
+  g_ns_mtx.Lock();
   spdk_env_opts_init(&opts);
   opts.name = "leveldb";
   opts.shm_id = 0;
@@ -675,6 +691,7 @@ PosixEnv::PosixEnv()
   rc = spdk_nvme_probe(NULL, NULL, probe_cb, attach_cb, NULL);
   if (rc != 0) {
     fprintf(stderr, "spdk_nvme_probe failed\n");
+    cleanup();
     exit(1);
   }
 
@@ -684,52 +701,58 @@ PosixEnv::PosixEnv()
     exit(1);
   }
 
-
-
-
-  bool real_dev = false;
-  dev_size_ = FS_SIZE;
-  dev_fd_ = open("/dev/sda1", O_RDWR | O_CREAT, 0644);
-  if (dev_fd_ == -1) {
-    perror("open ldb");
-    exit(1);
-  }
-  struct stat sts;
-  if (fstat(dev_fd_, &sts) == -1) {
-    perror("fstat");
-    exit(1);
-  }
-  if ((sts.st_mode & S_IFMT) == S_IFREG) {
-    if (ftruncate(dev_fd_, dev_size_) == -1) {
-      perror("ftruncate");
+  struct ns_entry *ns_ent;
+  ns_ent = g_namespaces;
+  if (ns_ent != NULL) {
+    ns_ent->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_ent->ctrlr, NULL, 0);
+    if (ns_ent->qpair == NULL) {
+      fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
       exit(1);
     }
-  } else if ((sts.st_mode & S_IFMT) == S_IFBLK) {
-    int nblk;
-    int sectsize;
-    ioctl(dev_fd_, BLKGETSIZE, &nblk);
-    ioctl(dev_fd_, BLKSSZGET, &sectsize);
-    real_dev = true;
-    if (1ULL * sectsize * nblk < FS_SIZE) {
-      fprintf(stderr, "device too small\n");
-      exit(1);
-    }
-  } else {
-    fprintf(stderr, "wrong file type\n");
+  }
+
+  g_sectsize = spdk_nvme_ns_get_sector_size(ns_ent->ns);
+  fprintf(stderr, "nvme sector size %d\n", g_sectsize);
+  assert(BLK_SIZE % g_sectsize == 0);
+  g_sect_per_blk = BLK_SIZE / g_sectsize;
+
+  g_spdkbuf = static_cast<char*>(
+                  spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
+                  SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+  if (g_spdkbuf == NULL) {
+    fprintf(stderr, "spdk_zmalloc failed\n");
     exit(1);
   }
-  dev_mmap_base_ = mmap(nullptr, dev_size_, PROT_READ | PROT_WRITE, MAP_SHARED,
-                        dev_fd_, 0);
-  if (dev_mmap_base_ == MAP_FAILED) {
-    perror("mmap");
+  int compl_status = 0;
+  rc = spdk_nvme_ns_cmd_read(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
+                             0, g_sect_per_blk,
+                             read_complete, &compl_status, 0);
+  if (rc != 0) {
+    fprintf(stderr, "spdk_read failed\n");
     exit(1);
   }
+
+  while (!compl_status)
+    spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
+
+  dev_size_ = spdk_nvme_ns_get_size(ns_ent->ns);
   free_idx_ = 0;
-  sb_ptr_ = static_cast<struct SuperBlock*>(dev_mmap_base_);
-  if (sb_ptr_->sb_magic == LDBFS_MAGIC) {
+  struct SuperBlock* sb_ptr = reinterpret_cast<struct SuperBlock*>(g_spdkbuf);
+  if (sb_ptr->sb_magic == LDBFS_MAGIC) {
+    fprintf(stderr, "found ldbfs\n");
     for (int i = 1; i < BLK_CNT; i++) {
-      struct RawFile *fptr = reinterpret_cast<struct RawFile*>(
-                             static_cast<char*>(dev_mmap_base_) + BLK_SIZE * i);
+      compl_status = 0;
+      rc = spdk_nvme_ns_cmd_read(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
+                                 0, g_sect_per_blk,
+                                 read_complete, &compl_status, 0);
+      if (rc != 0) {
+        fprintf(stderr, "spdk read failed\n");
+        exit(1);
+      }
+      while (!compl_status)
+        spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
+
+      struct RawFile *fptr = reinterpret_cast<struct RawFile*>(g_spdkbuf);
       switch (fptr->f_type) {
         case FTYPE_FREE:
           if (free_idx_ == 0) {
@@ -746,16 +769,39 @@ PosixEnv::PosixEnv()
       }
     }
   } else {
-    if (real_dev) {
-      for (int i = 1; i < BLK_CNT; i++) {
-        struct RawFile *fptr = reinterpret_cast<struct RawFile*>(
-                               static_cast<char*>(dev_mmap_base_) + BLK_SIZE * i);
-        fptr->f_type = FTYPE_FREE;
-      }
+    sb_ptr->sb_magic = LDBFS_MAGIC;
+    compl_status = 0;
+    rc = spdk_nvme_ns_cmd_write(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
+                           0, g_sect_per_blk,
+                           write_complete, &compl_status, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk write failed\n");
+      exit(1);
     }
-    sb_ptr_->sb_magic = LDBFS_MAGIC;
+    while (!compl_status)
+      spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
+
+    fprintf(stderr, "spdk sb write done\n");
+
+    struct RawFile* fptr = reinterpret_cast<struct RawFile*>(g_spdkbuf);
+    fptr->f_type = FTYPE_FREE;
+    fptr->f_size = 0;
+    fptr->f_name_len = 0;
+    fptr->f_name[0] = '\0';
+    for (int i = 1; i < BLK_CNT; i++) {
+      rc = spdk_nvme_ns_cmd_write(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
+                                 g_sect_per_blk * i, g_sect_per_blk,
+                                 write_complete, &compl_status, 0);
+      if (rc != 0) {
+        fprintf(stderr, "spdk_read failed\n");
+        exit(1);
+      }
+      while (!compl_status)
+        spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
+    }
     free_idx_ = 1;
   }
+  g_ns_mtx.Unlock();
 }
 
 void PosixEnv::Schedule(
@@ -867,8 +913,6 @@ void EnvPosixTestHelper::SetReadOnlyFDLimit(int limit) {
 }
 
 void EnvPosixTestHelper::SetReadOnlyMMapLimit(int limit) {
-  PosixDefaultEnv::AssertEnvNotInitialized();
-  g_mmap_limit = limit;
 }
 
 Env* Env::Default() {
