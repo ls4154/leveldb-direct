@@ -62,13 +62,13 @@ Status PosixError(const std::string& context, int error_number) {
   }
 }
 #define LDBFS_MAGIC 0x1234567890abcdefull
-#define BLK_SIZE (16ULL * 1024 * 1024)
+#define BLK_SIZE (8ULL * 1024 * 1024)
 #define BLK_CNT (4096)
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 
-#define MAX_PAYLOAD (BLK_SIZE - 32 - 1024)
-
-#define MAX_NAMELEN 1024
+#define BLK_META_SIZE (8 * 4)
+#define MAX_NAMELEN (1024 - BLK_META_SIZE)
+#define MAX_PAYLOAD (BLK_SIZE - 1024)
 
 struct SuperBlock {
     uint64_t sb_magic;
@@ -94,7 +94,7 @@ struct RawFile {
     char f_payload[];
 };
 
-static Slice Basename(const std::string& filename) {
+Slice Basename(const std::string& filename) {
   std::string::size_type separator_pos = filename.rfind('/');
   if (separator_pos == std::string::npos) {
     return Slice(filename);
@@ -332,11 +332,12 @@ class PosixEnv : public Env {
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
     struct RawFile *fptr;
+    fs_mutex_.Lock();
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
-          + BLK_SIZE * file_table_[filename]);
+      fptr = GetFptr(file_table_[filename]);
+      fs_mutex_.Unlock();
     } else {
+      fs_mutex_.Unlock();
       return PosixError(filename, ENOENT);
     }
     *result = new PosixSequentialFile(filename, fptr);
@@ -346,11 +347,12 @@ class PosixEnv : public Env {
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
     struct RawFile *fptr;
+    fs_mutex_.Lock();
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
-          + BLK_SIZE * file_table_[filename]);
+      fptr = GetFptr(file_table_[filename]);
+      fs_mutex_.Unlock();
     } else {
+      fs_mutex_.Unlock();
       return PosixError(filename, ENOENT);
     }
     *result = new PosixRandomAccessFile(filename, fptr);
@@ -360,21 +362,20 @@ class PosixEnv : public Env {
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
     struct RawFile *fptr;
+    fs_mutex_.Lock();
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
-          + BLK_SIZE * file_table_[filename]);
+      fptr = GetFptr(file_table_[filename]);
       fptr->f_size = 0; // delete if exists
     } else {
-      file_table_.insert({filename, free_idx_++});
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
-          + BLK_SIZE * file_table_[filename]);
+      file_table_.insert({filename, free_idx_.front()});
+      free_idx_.pop();
+      fptr = GetFptr(file_table_[filename]);
       strcpy(fptr->f_name, filename.c_str());
       fptr->f_name_len = filename.size();
       fptr->f_size = 0;
       fptr->f_type = FTYPE_REG;
     }
+    fs_mutex_.Unlock();
     *result = new PosixWritableFile(filename, fptr);
     return Status::OK();
   }
@@ -382,20 +383,19 @@ class PosixEnv : public Env {
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
     struct RawFile *fptr;
+    fs_mutex_.Lock();
     if (file_table_.count(filename)) {
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
-          + BLK_SIZE * file_table_[filename]);
+      fptr = GetFptr(file_table_[filename]);
     } else {
-      file_table_.insert({filename, free_idx_++});
-      fptr = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_)
-          + BLK_SIZE * file_table_[filename]);
+      file_table_.insert({filename, free_idx_.front()});
+      free_idx_.pop();
+      fptr = GetFptr(file_table_[filename]);
       strcpy(fptr->f_name, filename.c_str());
       fptr->f_name_len = filename.size();
       fptr->f_size = 0;
       fptr->f_type = FTYPE_REG;
     }
+    fs_mutex_.Unlock();
     *result = new PosixWritableFile(filename, fptr);
     return Status::OK();
   }
@@ -408,22 +408,26 @@ class PosixEnv : public Env {
                      std::vector<std::string>* result) override {
     result->clear();
 
-    for (auto &it : file_table_) {
+    fs_mutex_.Lock();
+    for (auto &it : file_table_)
       result->emplace_back(Basename(it.first).ToString());
-    }
+    fs_mutex_.Unlock();
 
     return Status::OK();
   }
 
   Status DeleteFile(const std::string& filename) override {
+    fs_mutex_.Lock();
     if (!file_table_.count(filename)) {
+      fs_mutex_.Unlock();
       return PosixError(filename, ENOENT);
     }
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
+    fptr = GetFptr(file_table_[filename]);
     fptr->f_type = FTYPE_FREE;
+    free_idx_.push(file_table_[filename]);
     file_table_.erase(filename);
+    fs_mutex_.Unlock();
 
     return Status::OK();
   }
@@ -437,29 +441,32 @@ class PosixEnv : public Env {
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
+    fs_mutex_.Lock();
     if (!file_table_.count(filename)) {
+      fs_mutex_.Unlock();
       return PosixError(filename, ENOENT);
     }
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[filename]);
+    fptr = GetFptr(file_table_[filename]);
     *size = fptr->f_size;
+    fs_mutex_.Unlock();
     return Status::OK();
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
+    fs_mutex_.Lock();
     if (!file_table_.count(from)) {
+      fs_mutex_.Unlock();
       return PosixError(from, ENOENT);
     }
     struct RawFile *fptr;
-    fptr = reinterpret_cast<struct RawFile*>(
-        static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[from]);
+    fptr = GetFptr(file_table_[from]);
 
     if (file_table_.count(to)) {
       struct RawFile *fptr2;
-      fptr2 = reinterpret_cast<struct RawFile*>(
-          static_cast<char*>(dev_mmap_base_) + BLK_SIZE * file_table_[to]);
+      fptr2 = GetFptr(file_table_[to]);
       fptr2->f_type = FTYPE_FREE;
+      free_idx_.push(file_table_[to]);
       file_table_.erase(to);
     }
 
@@ -468,6 +475,7 @@ class PosixEnv : public Env {
 
     strcpy(fptr->f_name, to.c_str());
     fptr->f_name_len = to.size();
+    fs_mutex_.Unlock();
 
     return Status::OK();
   }
@@ -531,6 +539,12 @@ class PosixEnv : public Env {
     void* const arg;
   };
 
+
+  struct RawFile* GetFptr(int idx) {
+    return reinterpret_cast<struct RawFile*>(
+             static_cast<char*>(dev_mmap_base_) + BLK_SIZE * idx);
+  }
+
   port::Mutex background_work_mutex_;
   port::CondVar background_work_cv_ GUARDED_BY(background_work_mutex_);
   bool started_background_thread_ GUARDED_BY(background_work_mutex_);
@@ -543,8 +557,9 @@ class PosixEnv : public Env {
   int dev_fd_;
   uint64_t dev_size_;
   void* dev_mmap_base_;
-  std::map<std::string, uint64_t> file_table_;
-  int free_idx_;
+  std::map<std::string, int> file_table_; // fs_mutex_
+  std::queue<int> free_idx_; // fs_mutex_
+  port::Mutex fs_mutex_;
   struct SuperBlock *sb_ptr_;
 };
 
@@ -590,21 +605,17 @@ PosixEnv::PosixEnv()
     perror("mmap");
     exit(1);
   }
-  free_idx_ = 0;
+  fs_mutex_.Lock();
   sb_ptr_ = static_cast<struct SuperBlock*>(dev_mmap_base_);
   if (sb_ptr_->sb_magic == LDBFS_MAGIC) {
     for (int i = 1; i < BLK_CNT; i++) {
-      struct RawFile *fptr = reinterpret_cast<struct RawFile*>(
-                             static_cast<char*>(dev_mmap_base_) + BLK_SIZE * i);
+      struct RawFile *fptr = GetFptr(i);
       switch (fptr->f_type) {
         case FTYPE_FREE:
-          if (free_idx_ == 0) {
-            free_idx_ = i;
-          }
+          free_idx_.push(i);
           break;
         case FTYPE_REG:
           file_table_.insert({fptr->f_name, i});
-          free_idx_ = 0;
           break;
         default:
           printf("unknown file\n");
@@ -614,14 +625,14 @@ PosixEnv::PosixEnv()
   } else {
     if (real_dev) {
       for (int i = 1; i < BLK_CNT; i++) {
-        struct RawFile *fptr = reinterpret_cast<struct RawFile*>(
-                               static_cast<char*>(dev_mmap_base_) + BLK_SIZE * i);
+        struct RawFile *fptr = GetFptr(i);
         fptr->f_type = FTYPE_FREE;
+        free_idx_.push(i);
       }
     }
     sb_ptr_->sb_magic = LDBFS_MAGIC;
-    free_idx_ = 1;
   }
+  fs_mutex_.Unlock();
 }
 
 void PosixEnv::Schedule(
