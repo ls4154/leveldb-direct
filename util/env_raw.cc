@@ -39,6 +39,8 @@
 #include "util/env_posix_test_helper.h"
 #include "util/raw_logger.h"
 
+const char* ldbraw_dev_name = "/dev/sda1";
+
 namespace leveldb {
 
 namespace {
@@ -570,7 +572,7 @@ PosixEnv::PosixEnv()
       started_background_thread_(false) {
   bool real_dev = false;
   dev_size_ = FS_SIZE;
-  dev_fd_ = open("/dev/sda1", O_RDWR | O_CREAT, 0644);
+  dev_fd_ = open(ldbraw_dev_name, O_RDWR | O_CREAT, 0644);
   if (dev_fd_ == -1) {
     perror("open ldb");
     exit(1);
