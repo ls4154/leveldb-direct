@@ -1009,8 +1009,8 @@ PosixEnv::PosixEnv()
         spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
       free_idx_.push(i);
     }
-    fs_mutex_.Unlock();
   }
+  fs_mutex_.Unlock();
   g_ns_mtx.Unlock();
 }
 
