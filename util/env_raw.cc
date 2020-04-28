@@ -654,8 +654,10 @@ class PosixEnv : public Env {
     fprintf(stderr, "DeleteFile %s\n", filename.c_str());
 
     fs_mutex_.Lock();
-    if (!file_table_.count(filename))
+    if (!file_table_.count(filename)) {
+      fs_mutex_.Unlock();
       return PosixError(filename, ENOENT);
+    }
 
     idx = file_table_[filename];
     fbuf = static_cast<char*>(
