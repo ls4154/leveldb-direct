@@ -159,13 +159,10 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     Status status;
-
     n = std::min(n, file_ptr_->f_size - offset);
-
-    memcpy(scratch, file_ptr_->f_payload + offset, n);
-
-    *result = Slice(scratch, n);
-
+    //memcpy(scratch, file_ptr_->f_payload + offset, n);
+    //*result = Slice(scratch, n);
+    *result = Slice(file_ptr_->f_payload + offset, n);
     return status;
   }
 
