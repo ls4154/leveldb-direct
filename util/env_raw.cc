@@ -186,7 +186,7 @@ Status PosixError(const std::string& context, int error_number) {
 }
 #define LDBFS_MAGIC 0x1234567890abcdefull
 #define BLK_SIZE (8ULL * 1024 * 1024)
-#define BLK_CNT (1024)
+#define BLK_CNT (4096)
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 
 #define BLK_META_SIZE (8 * 4)
@@ -911,7 +911,7 @@ PosixEnv::PosixEnv()
     for (int i = 1; i < BLK_CNT; i++) {
       compl_status = 0;
       rc = spdk_nvme_ns_cmd_read(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
-                                 0, g_sect_per_blk,
+                                 g_sect_per_blk * i, g_sect_per_blk,
                                  read_complete, &compl_status, 0);
       if (rc != 0) {
         fprintf(stderr, "spdk read failed\n");
