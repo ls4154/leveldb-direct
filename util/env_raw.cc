@@ -684,6 +684,7 @@ class PosixEnv : public Env {
     free_idx_.push(idx);
     file_table_.erase(filename);
     fs_mutex_.Unlock();
+    spdk_free(fbuf);
 
     return Status::OK();
   }
@@ -737,6 +738,7 @@ class PosixEnv : public Env {
     fptr = reinterpret_cast<struct RawFile*>(fbuf);
 
     *size = fptr->f_size;
+    spdk_free(fbuf);
     return Status::OK();
   }
 
@@ -799,6 +801,7 @@ class PosixEnv : public Env {
     file_table_[to] = file_table_[from];
     file_table_.erase(from);
     fs_mutex_.Unlock();
+    spdk_free(fbuf);
 
     return Status::OK();
   }
