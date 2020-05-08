@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -49,6 +50,31 @@ extern "C" {
 
 namespace leveldb {
 
+#define LDBFS_MAGIC 0x1234567890abcdefull
+#define BLK_SIZE (4ULL * 1024 * 1024)     // 4 MiB per block
+#define META_SIZE (128)
+#define BLK_CNT (BLK_SIZE / META_SIZE)    // maximum blocks in LDBFS
+#define FS_SIZE (BLK_SIZE * BLK_CNT)
+#define MAX_NAMELEN (META_SIZE - 8)
+
+#define BUF_ALIGN (0x1000)
+
+struct FileMeta {
+  union {
+    struct {
+      uint32_t f_size;
+      uint16_t f_next_blk;
+      uint8_t  f_name_len;
+    };
+    uint64_t   sb_magic;
+  };
+  char         f_name[MAX_NAMELEN];
+};
+
+struct SuperBlock {
+  FileMeta sb_meta[BLK_CNT];
+};
+
 struct ctrlr_entry {
   struct spdk_nvme_ctrlr* ctrlr;
   struct ctrlr_entry* next;
@@ -60,15 +86,18 @@ struct ns_entry {
   struct spdk_nvme_ns* ns;
   struct ns_entry* next;
   struct spdk_nvme_qpair* qpair;
+  struct spdk_nvme_qpair* qpair_comp;
 };
 
 struct ctrlr_entry* g_controllers = NULL;
 struct ns_entry* g_namespaces = NULL;
 struct port::Mutex g_ns_mtx;
+
 int g_sectsize;
 int g_nsect;
 int g_sect_per_blk;
-char* g_spdkbuf;
+void* g_sbbuf;
+SuperBlock* g_sb_ptr;
 
 bool g_vmd = false;
 
@@ -152,22 +181,106 @@ void cleanup(void)
 
 void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
-  int* st = static_cast<int*>(arg);
-  *st = 1;
+  int* compl_status = static_cast<int*>(arg);
+  *compl_status = 1;
   if (spdk_nvme_cpl_is_error(completion)) {
     fprintf(stderr, "spdk write cpl error\n");
-    *st = 2;
+    *compl_status = 2;
   }
 }
 
 void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
-  int* st = static_cast<int*>(arg);
-  *st = 1;
+  int* compl_status = static_cast<int*>(arg);
+  *compl_status = 1;
   if (spdk_nvme_cpl_is_error(completion)) {
     fprintf(stderr, "spdk read cpl error\n");
-    *st = 2;
+    *compl_status = 2;
   }
+}
+
+void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
+                    void *buf, uint64_t lba, uint32_t cnt)
+{
+  int rc;
+  int cpl;
+  rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, &cpl, 0);
+  if (rc != 0) {
+    fprintf(stderr, "spdk write failed\n");
+    exit(1);
+  }
+  while (!cpl)
+    spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
+void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
+                 void *buf, uint64_t lba, uint32_t cnt)
+{
+  int rc;
+  int cpl;
+  rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &cpl, 0);
+  if (rc != 0) {
+    fprintf(stderr, "spdk read failed\n");
+    exit(1);
+  }
+  while (!cpl)
+    spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
+void init_spdk(void)
+{
+  int rc;
+  struct spdk_env_opts opts;
+
+  spdk_env_opts_init(&opts);
+  opts.name = "leveldb";
+  opts.shm_id = 0;
+  if (spdk_env_init(&opts) < 0) {
+    fprintf(stderr, "spdk_env_init failed\n");
+    exit(1);
+  }
+
+  rc = spdk_nvme_probe(NULL, NULL, probe_cb, attach_cb, NULL);
+  if (rc != 0) {
+    fprintf(stderr, "spdk_nvme_probe failed\n");
+    cleanup();
+    exit(1);
+  }
+
+  if (g_controllers == NULL) {
+    fprintf(stderr, "no NVMe contollers found\n");
+    cleanup();
+    exit(1);
+  }
+
+  if (g_namespaces == NULL) {
+    fprintf(stderr, "no namespaces found\n");
+    cleanup();
+    exit(1);
+  }
+
+  struct ns_entry *ns_ent = g_namespaces;
+
+  ns_ent->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_ent->ctrlr, NULL, 0);
+  if (ns_ent->qpair == NULL) {
+    fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
+    exit(1);
+  }
+
+  ns_ent->qpair_comp = spdk_nvme_ctrlr_alloc_io_qpair(ns_ent->ctrlr, NULL, 0);
+  if (ns_ent->qpair_comp == NULL) {
+    fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed (compaction)\n");
+    exit(1);
+  }
+
+  g_sectsize = spdk_nvme_ns_get_sector_size(ns_ent->ns);
+  g_nsect = spdk_nvme_ns_get_num_sectors(ns_ent->ns);
+  assert(BLK_SIZE % g_sectsize == 0);
+  g_sect_per_blk = BLK_SIZE / g_sectsize;
+
+  fprintf(stderr, "nvme sector size %d\n", g_sectsize);
+  fprintf(stderr, "nvme ns sector count %d\n", g_nsect);
+  fprintf(stderr, "sectors per block %d\n", g_sect_per_blk);
 }
 
 namespace {
@@ -184,38 +297,6 @@ Status PosixError(const std::string& context, int error_number) {
     return Status::IOError(context, std::strerror(error_number));
   }
 }
-#define LDBFS_MAGIC 0x1234567890abcdefull
-#define BLK_SIZE (8ULL * 1024 * 1024)
-#define BLK_CNT (4096)
-#define FS_SIZE (BLK_SIZE * BLK_CNT)
-
-#define BLK_META_SIZE (8 * 4)
-#define MAX_NAMELEN (1024 - BLK_META_SIZE)
-#define MAX_PAYLOAD (BLK_SIZE - 1024)
-
-struct SuperBlock {
-    uint64_t sb_magic;
-    uint64_t sb_fcnt;
-    uint64_t sb_reserved0;
-    uint64_t sb_reserved1;
-};
-
-enum {
-    FTYPE_FREE = 0,
-    FTYPE_REG = 1,
-    FTYPE_DIR = 2,
-    FTYPE_LOCK = 3,
-    FTYPE_DATA = 4
-};
-
-struct RawFile {
-    uint64_t f_type;
-    uint64_t f_size;
-    uint64_t f_name_len;
-    uint64_t f_next_blk;
-    char f_name[MAX_NAMELEN];
-    char f_payload[];
-};
 
 Slice Basename(const std::string& filename) {
   std::string::size_type separator_pos = filename.rfind('/');
@@ -237,7 +318,8 @@ Slice Basename(const std::string& filename) {
 class PosixSequentialFile final : public SequentialFile {
  public:
   PosixSequentialFile(std::string filename, char* file_buf, int idx)
-      : filename_(filename), buf_(file_buf), offset_(0), idx_(idx) {
+      : filename_(filename), buf_(file_buf), offset_(0), idx_(idx),
+        meta_(&g_sb_ptr->sb_meta[idx]) {
     int rc;
     int compl_status = 0;
     g_ns_mtx.Lock();
@@ -251,7 +333,6 @@ class PosixSequentialFile final : public SequentialFile {
     while (!compl_status)
       spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
     g_ns_mtx.Unlock();
-    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
   }
   ~PosixSequentialFile() override {
     spdk_free(buf_);
@@ -259,17 +340,17 @@ class PosixSequentialFile final : public SequentialFile {
 
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
-    n = std::min(n, file_ptr_->f_size - offset_);
-    memcpy(scratch, file_ptr_->f_payload + offset_, n);
+    n = std::min(n, (uint64_t)meta_->f_size - offset_);
+    memcpy(scratch, buf_ + offset_, n);
     *result = Slice(scratch, n);
-    //*result = Slice(file_ptr_->f_payload + offset_, n);
+    //*result = Slice(buf_ + offset_, n);
     offset_ += n;
     return status;
   }
 
   Status Skip(uint64_t n) override {
     offset_ += n;
-    if (offset_ > MAX_PAYLOAD)
+    if (offset_ > BLK_SIZE)
       return PosixError(filename_, errno);
     return Status::OK();
   }
@@ -277,7 +358,7 @@ class PosixSequentialFile final : public SequentialFile {
  private:
   const std::string filename_;
   char* buf_;
-  RawFile *file_ptr_;
+  FileMeta* meta_;
   off_t offset_;
   int idx_;
 };
@@ -292,21 +373,14 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
   PosixRandomAccessFile(std::string filename, char* file_buf, int idx)
-      : filename_(std::move(filename)), buf_(file_buf), idx_(idx) {
+      : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
+        meta_(&g_sb_ptr->sb_meta[idx]) {
     int rc;
     int compl_status = 0;
     g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, buf_,
-                           g_sect_per_blk * idx_, g_sect_per_blk,
-                           read_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk read failed\n");
-      exit(1);
-    }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
+    read_to_buf(g_namespaces->ns, g_namespaces->qpair, buf_,
+                g_sect_per_blk * idx_, g_sect_per_blk);
     g_ns_mtx.Unlock();
-    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
   }
 
   ~PosixRandomAccessFile() override {
@@ -330,7 +404,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   const std::string filename_;
 
   char* buf_;
-  RawFile *file_ptr_;
+  FileMeta* meta_;
   int idx_;
 };
 
@@ -459,7 +533,7 @@ class PosixWritableFile final : public WritableFile {
   const std::string dirname_;  // The directory of filename_.
 
   char* buf_;
-  RawFile *file_ptr_;
+
   off_t offset_;
   int idx_;
 };
@@ -885,131 +959,45 @@ class PosixEnv : public Env {
 PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false) {
-
-  int rc;
-  struct spdk_env_opts opts;
-
   g_ns_mtx.Lock();
-  spdk_env_opts_init(&opts);
-  opts.name = "leveldb";
-  opts.shm_id = 0;
-  if (spdk_env_init(&opts) < 0) {
-    fprintf(stderr, "spdk_env_init failed\n");
-    exit(1);
-  }
+  fs_mutex_.Lock();
+  init_spdk();
 
-  rc = spdk_nvme_probe(NULL, NULL, probe_cb, attach_cb, NULL);
-  if (rc != 0) {
-    fprintf(stderr, "spdk_nvme_probe failed\n");
-    cleanup();
-    exit(1);
-  }
+  g_sbbuf = spdk_zmalloc(BLK_SIZE, BUF_ALIGN, nullptr,
+                         SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
 
-  if (g_controllers == NULL) {
-    fprintf(stderr, "no NVMe contollers found\n");
-    cleanup();
-    exit(1);
-  }
-
-  struct ns_entry *ns_ent;
-  ns_ent = g_namespaces;
-  if (ns_ent != NULL) {
-    ns_ent->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_ent->ctrlr, NULL, 0);
-    if (ns_ent->qpair == NULL) {
-      fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
-      exit(1);
-    }
-  }
-
-  g_sectsize = spdk_nvme_ns_get_sector_size(ns_ent->ns);
-  g_nsect = spdk_nvme_ns_get_num_sectors(ns_ent->ns);
-  fprintf(stderr, "nvme sector size %d\n", g_sectsize);
-  fprintf(stderr, "nvme ns sector count %d\n", g_nsect);
-  assert(BLK_SIZE % g_sectsize == 0);
-  g_sect_per_blk = BLK_SIZE / g_sectsize;
-  fprintf(stderr, "sectors per block %d\n", g_sect_per_blk);
-
-  g_spdkbuf = static_cast<char*>(
-                  spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-                  SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-  if (g_spdkbuf == NULL) {
+  if (g_sbbuf == nullptr) {
     fprintf(stderr, "spdk_zmalloc failed\n");
     exit(1);
   }
-  int compl_status = 0;
-  rc = spdk_nvme_ns_cmd_read(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
-                             0, g_sect_per_blk,
-                             read_complete, &compl_status, 0);
-  if (rc != 0) {
-    fprintf(stderr, "spdk read failed\n");
-    exit(1);
-  }
 
-  while (!compl_status)
-    spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
+  struct ns_entry *ns_ent = g_namespaces;
+
+  read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk);
 
   dev_size_ = spdk_nvme_ns_get_size(ns_ent->ns);
-  fs_mutex_.Lock();
-  struct SuperBlock* sb_ptr = reinterpret_cast<struct SuperBlock*>(g_spdkbuf);
-  if (sb_ptr->sb_magic == LDBFS_MAGIC) {
-    fprintf(stderr, "found ldbfs\n");
-    for (int i = 1; i < BLK_CNT; i++) {
-      compl_status = 0;
-      rc = spdk_nvme_ns_cmd_read(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
-                                 g_sect_per_blk * i, g_sect_per_blk,
-                                 read_complete, &compl_status, 0);
-      if (rc != 0) {
-        fprintf(stderr, "spdk read failed\n");
-        exit(1);
-      }
-      while (!compl_status)
-        spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
 
-      struct RawFile *fptr = reinterpret_cast<struct RawFile*>(g_spdkbuf);
-      switch (fptr->f_type) {
-        case FTYPE_FREE:
-          free_idx_.push(i);
-          break;
-        case FTYPE_REG:
-          file_table_.insert({fptr->f_name, i});
-          break;
-        default:
-          printf("unknown file\n");
-          break;
+  g_sb_ptr = reinterpret_cast<struct SuperBlock*>(g_sbbuf);
+  FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
+
+  if (sb_meta->sb_magic == LDBFS_MAGIC) {
+    fprintf(stderr, "ldbfs found\n");
+    for (int i = 1; i < BLK_CNT; i++) {
+      FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
+      if (meta_ent->f_name_len == 0) {
+        free_idx_.push(i);
+      } else {
+        file_table_.insert({meta_ent->f_name, i});
       }
     }
   } else {
-    sb_ptr->sb_magic = LDBFS_MAGIC;
-    compl_status = 0;
-    rc = spdk_nvme_ns_cmd_write(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
-                           0, g_sect_per_blk,
-                           write_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk write failed\n");
-      exit(1);
-    }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
+    memset(g_sbbuf, 0, BLK_SIZE);
+    sb_meta->sb_magic = LDBFS_MAGIC;
 
+    write_from_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk);
     fprintf(stderr, "spdk sb write done\n");
 
-    struct RawFile* fptr = reinterpret_cast<struct RawFile*>(g_spdkbuf);
-    fptr->f_type = FTYPE_FREE;
-    fptr->f_size = 0;
-    fptr->f_name_len = 0;
-    fptr->f_name[0] = '\0';
     for (int i = 1; i < BLK_CNT; i++) {
-      fprintf(stderr, "write blk %d\n", i);
-      compl_status = 0;
-      rc = spdk_nvme_ns_cmd_write(ns_ent->ns, ns_ent->qpair, g_spdkbuf,
-                                 g_sect_per_blk * i, g_sect_per_blk,
-                                 write_complete, &compl_status, 0);
-      if (rc != 0) {
-        fprintf(stderr, "spdk write failed\n");
-        exit(1);
-      }
-      while (!compl_status)
-        spdk_nvme_qpair_process_completions(ns_ent->qpair, 0);
       free_idx_.push(i);
     }
   }
