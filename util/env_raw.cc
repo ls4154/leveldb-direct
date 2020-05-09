@@ -50,7 +50,7 @@ extern "C" {
 
 namespace leveldb {
 
-#define LDBFS_MAGIC 0x1234567890abcdefull
+#define LDBFS_MAGIC (0xe51ab1541542020full)
 #define BLK_SIZE (4ULL * 1024 * 1024)     // 4 MiB per block
 #define META_SIZE (128)
 #define BLK_CNT (BLK_SIZE / META_SIZE)    // maximum blocks in LDBFS
@@ -58,6 +58,9 @@ namespace leveldb {
 #define MAX_NAMELEN (META_SIZE - 8)
 
 #define BUF_ALIGN (0x1000)
+
+#define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
+#define ROUND_DOWN(N, S) ((N) / (S) * (S))
 
 struct FileMeta {
   union {
@@ -85,19 +88,22 @@ struct ns_entry {
   struct spdk_nvme_ctrlr* ctrlr;
   struct spdk_nvme_ns* ns;
   struct ns_entry* next;
-  struct spdk_nvme_qpair* qpair;
-  struct spdk_nvme_qpair* qpair_comp;
+  struct port::Mutex qpair_mtx;
+  struct spdk_nvme_qpair* qpair;      // guarded by qpair_mtx
+  struct spdk_nvme_qpair* qpair_comp; // for compaction thread
 };
 
-struct ctrlr_entry* g_controllers = NULL;
-struct ns_entry* g_namespaces = NULL;
+struct ctrlr_entry* g_controllers = NULL; // guarded by g_ns_mtx
+struct ns_entry* g_namespaces = NULL;     // guarded by g_ns_mtx
 struct port::Mutex g_ns_mtx;
 
 int g_sectsize;
 int g_nsect;
 int g_sect_per_blk;
-void* g_sbbuf;
-SuperBlock* g_sb_ptr;
+void* g_sbbuf;        // guarded by fs_mutex
+SuperBlock* g_sb_ptr; // guarded by fs_mutex
+
+thread_local bool compaction_thd = false;
 
 bool g_vmd = false;
 
@@ -340,7 +346,7 @@ class PosixSequentialFile final : public SequentialFile {
 
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
-    n = std::min(n, (uint64_t)meta_->f_size - offset_);
+    n = std::min(n, meta_->f_size - offset_);
     memcpy(scratch, buf_ + offset_, n);
     *result = Slice(scratch, n);
     //*result = Slice(buf_ + offset_, n);
@@ -359,7 +365,7 @@ class PosixSequentialFile final : public SequentialFile {
   const std::string filename_;
   char* buf_;
   FileMeta* meta_;
-  off_t offset_;
+  uint64_t offset_;
   int idx_;
 };
 
@@ -390,19 +396,14 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     Status status;
-
-    n = std::min(n, file_ptr_->f_size - offset);
-
-    memcpy(scratch, file_ptr_->f_payload + offset, n);
-
+    n = std::min(n, meta_->f_size - offset);
+    memcpy(scratch, buf_ + offset, n);
     *result = Slice(scratch, n);
-
     return status;
   }
 
  private:
   const std::string filename_;
-
   char* buf_;
   FileMeta* meta_;
   int idx_;
@@ -703,7 +704,11 @@ class PosixEnv : public Env {
   }
 
   bool FileExists(const std::string& filename) override {
-    return file_table_.count(filename);
+    fs_mutex_.Lock();
+    bool ret = file_table_.count(filename);
+    fs_mutex_.Unlock();
+
+    return ret;
   }
 
   Status GetChildren(const std::string& directory_path,
@@ -719,46 +724,44 @@ class PosixEnv : public Env {
   }
 
   Status DeleteFile(const std::string& filename) override {
-    int rc;
-    int compl_status = 0;
-    char* fbuf;
-    int idx;
-    struct RawFile *fptr;
-
     fprintf(stderr, "DeleteFile %s\n", filename.c_str());
 
     fs_mutex_.Lock();
+
     if (!file_table_.count(filename)) {
       fs_mutex_.Unlock();
       return PosixError(filename, ENOENT);
     }
 
-    idx = file_table_[filename];
-    fbuf = static_cast<char*>(
-                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "DelFile zmalloc failed\n");
-      exit(1);
+    int idx = file_table_[filename];
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+    meta->f_size = 0;
+    meta->f_name_len = 0;
+    meta->f_next_blk = 0;
+    meta->f_name[0] = '\0';
+
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
     }
-    fptr = reinterpret_cast<RawFile*>(fbuf);
-    fptr->f_type = FTYPE_FREE;
-    g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, fbuf,
-                           g_sect_per_blk * idx, g_sect_per_blk,
-                           write_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk write failed\n");
-      exit(1);
+
+    assert(META_SIZE <= g_sectsize);
+    uint64_t offset = idx * META_SIZE; // in bytes
+    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1);
+
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
     }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
 
     free_idx_.push(idx);
     file_table_.erase(filename);
+
     fs_mutex_.Unlock();
-    spdk_free(fbuf);
 
     return Status::OK();
   }
@@ -772,13 +775,7 @@ class PosixEnv : public Env {
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
-    int idx;
-    int rc;
-    int compl_status = 0;
-    char* fbuf;
-    struct RawFile *fptr;
-
-    fprintf(stderr, "GetSize %s\n", filename.c_str());
+    fprintf(stderr, "GetFileSize %s\n", filename.c_str());
 
     fs_mutex_.Lock();
     if (!file_table_.count(filename)) {
@@ -786,96 +783,58 @@ class PosixEnv : public Env {
       return PosixError(filename, ENOENT);
     }
 
-    idx = file_table_[filename];
+    int idx = file_table_[filename];
+
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+    *size = meta->f_size;
+
     fs_mutex_.Unlock();
 
-    fbuf = static_cast<char*>(
-                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "GetFsize zmalloc failed\n");
-      exit(1);
-    }
-
-    g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, fbuf,
-                           g_sect_per_blk * idx, g_sect_per_blk,
-                           read_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk read failed\n");
-      exit(1);
-    }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
-
-    fptr = reinterpret_cast<struct RawFile*>(fbuf);
-
-    *size = fptr->f_size;
-    spdk_free(fbuf);
     return Status::OK();
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
-    int rc;
-    int compl_status = 0;
-    char* fbuf;
-    int idx;
-    struct RawFile *fptr;
-
-    fprintf(stderr, "Rename %s %s\n", from.c_str(), to.c_str());
+    fprintf(stderr, "RenameFile %s %s\n", from.c_str(), to.c_str());
 
     fs_mutex_.Lock();
+
     if (!file_table_.count(from)) {
       fs_mutex_.Unlock();
       return PosixError(from, ENOENT);
     }
 
     fs_mutex_.Unlock();
-    DeleteFile(to);
-
+    DeleteFile(to); // ignore error
     fs_mutex_.Lock();
-    idx = file_table_[from];
-    fbuf = static_cast<char*>(
-                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "Rename zmalloc failed\n");
-      exit(1);
-    }
-    g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, fbuf,
-                           g_sect_per_blk * idx, g_sect_per_blk,
-                           read_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk read failed\n");
-      exit(1);
-    }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
 
-    fptr = reinterpret_cast<struct RawFile*>(fbuf);
-    strcpy(fptr->f_name, to.c_str());
-    fptr->f_name_len = to.size();
+    int idx = file_table_[from];
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
-    g_ns_mtx.Lock();
-    compl_status = 0;
-    spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, fbuf,
-                           g_sect_per_blk * idx, g_sect_per_blk,
-                           write_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk write failed\n");
-      exit(1);
+    meta->f_name_len = to.size();
+    strcpy(meta->f_name, to.c_str());
+
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
     }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
+
+    assert(META_SIZE <= g_sectsize);
+    uint64_t offset = idx * META_SIZE; // in bytes
+    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1);
+
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
 
     file_table_[to] = file_table_[from];
     file_table_.erase(from);
+
     fs_mutex_.Unlock();
-    spdk_free(fbuf);
 
     return Status::OK();
   }
@@ -949,8 +908,8 @@ class PosixEnv : public Env {
   PosixLockTable locks_;  // Thread-safe.
 
   uint64_t dev_size_;
-  std::map<std::string, int> file_table_; // fs_mutex_
-  std::queue<int> free_idx_; // fs_mutex_
+  std::map<std::string, int> file_table_; // guarded by fs_mutex_
+  std::queue<int> free_idx_; // guarded by fs_mutex_
   port::Mutex fs_mutex_;
 };
 
@@ -960,24 +919,27 @@ PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false) {
   g_ns_mtx.Lock();
-  fs_mutex_.Lock();
+
   init_spdk();
 
   g_sbbuf = spdk_zmalloc(BLK_SIZE, BUF_ALIGN, nullptr,
                          SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-
   if (g_sbbuf == nullptr) {
     fprintf(stderr, "spdk_zmalloc failed\n");
     exit(1);
   }
+  g_ns_mtx.Unlock();
+
+  fs_mutex_.Lock();
 
   struct ns_entry *ns_ent = g_namespaces;
+  ns_ent->qpair_mtx.Lock();
 
   read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk);
 
   dev_size_ = spdk_nvme_ns_get_size(ns_ent->ns);
 
-  g_sb_ptr = reinterpret_cast<struct SuperBlock*>(g_sbbuf);
+  g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
   FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
 
   if (sb_meta->sb_magic == LDBFS_MAGIC) {
@@ -1001,8 +963,9 @@ PosixEnv::PosixEnv()
       free_idx_.push(i);
     }
   }
+
+  ns_ent->qpair_mtx.Unlock();
   fs_mutex_.Unlock();
-  g_ns_mtx.Unlock();
 }
 
 void PosixEnv::Schedule(
@@ -1027,6 +990,7 @@ void PosixEnv::Schedule(
 }
 
 void PosixEnv::BackgroundThreadMain() {
+  compaction_thd = true;
   while (true) {
     background_work_mutex_.Lock();
 
