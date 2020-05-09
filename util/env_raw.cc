@@ -466,6 +466,22 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status Close() override {
+    g_sb_ptr->sb_meta[idx_].f_size = size_;
+
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    uint64_t offset = idx_ * META_SIZE;
+    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
+    uint64_t lba = ROUND_DOWN(offset, g_sectsize) / g_sectsize;
+    write_from_buf(ns, qpair, meta_buf, lba, 1, true);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
     Sync();
     closed_ = true;
     return Status::OK();
@@ -476,7 +492,25 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status Sync() override {
-    // TODO
+    if (synced_ == size_)
+      return Status::OK();
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
+    uint64_t lba = ROUND_DOWN(g_sect_per_blk * idx_ + synced_, g_sectsize) / 
+                   g_sectsize;
+    uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
+
+    write_from_buf(ns, qpair, target_buf, lba, cnt, true);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
+    synced_ = size_;
     return Status::OK();
   }
 
