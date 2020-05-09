@@ -652,8 +652,9 @@ class PosixEnv : public Env {
   }
 
   bool FileExists(const std::string& filename) override {
+    std::string basename = Basename(filename).ToString();
     g_fs_mtx.Lock();
-    bool ret = g_file_table.count(filename);
+    bool ret = g_file_table.count(basename);
     g_fs_mtx.Unlock();
 
     return ret;
@@ -665,7 +666,7 @@ class PosixEnv : public Env {
 
     g_fs_mtx.Lock();
     for (auto &it : g_file_table)
-      result->emplace_back(Basename(it.first).ToString());
+      result->emplace_back(it.first);
     g_fs_mtx.Unlock();
 
     return Status::OK();
@@ -674,14 +675,16 @@ class PosixEnv : public Env {
   Status DeleteFile(const std::string& filename) override {
     fprintf(stderr, "DeleteFile %s\n", filename.c_str());
 
+    std::string basename = Basename(filename).ToString();
+
     g_fs_mtx.Lock();
 
-    if (!g_file_table.count(filename)) {
+    if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
 
-    int idx = g_file_table[filename];
+    int idx = g_file_table[basename];
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
     meta->f_size = 0;
@@ -707,7 +710,7 @@ class PosixEnv : public Env {
     }
 
     g_free_idx.push(idx);
-    g_file_table.erase(filename);
+    g_file_table.erase(basename);
 
     g_fs_mtx.Unlock();
 
@@ -725,13 +728,15 @@ class PosixEnv : public Env {
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
     fprintf(stderr, "GetFileSize %s\n", filename.c_str());
 
+    std::string basename = Basename(filename).ToString();
+
     g_fs_mtx.Lock();
-    if (!g_file_table.count(filename)) {
+    if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
 
-    int idx = g_file_table[filename];
+    int idx = g_file_table[basename];
 
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
@@ -756,11 +761,14 @@ class PosixEnv : public Env {
     DeleteFile(to); // ignore error
     g_fs_mtx.Lock();
 
-    int idx = g_file_table[from];
+    std::string basename_from = Basename(from).ToString();
+    std::string basename_to = Basename(to).ToString();
+
+    int idx = g_file_table[basename_from];
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
-    meta->f_name_len = to.size();
-    strcpy(meta->f_name, to.c_str());
+    meta->f_name_len = basename_to.size();
+    strcpy(meta->f_name, basename_to.c_str());
 
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ns* ns = ns_ent->ns;
@@ -779,8 +787,8 @@ class PosixEnv : public Env {
       ns_ent->qpair_mtx.Unlock();
     }
 
-    g_file_table[to] = g_file_table[from];
-    g_file_table.erase(from);
+    g_file_table[basename_to] = g_file_table[basename_from];
+    g_file_table.erase(basename_from);
 
     g_fs_mtx.Unlock();
 
