@@ -426,50 +426,30 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 class PosixWritableFile final : public WritableFile {
  public:
   PosixWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
-      : is_manifest_(IsManifest(filename)),
-        filename_(filename),
-        buf_(file_buf),
-        idx_(idx),
-        dirname_(Dirname(filename_)) {
-    int rc;
-    int compl_status = 0;
-    g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, buf_,
-                           g_sect_per_blk * idx_, g_sect_per_blk,
-                           read_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk read failed\n");
-      exit(1);
+      : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
+        size_(g_sb_ptr->sb_meta[idx].f_size), synced_(size_) {
+    if (truncate) {
+      size_ = 0;
+      synced_ = 0;
+      return;
     }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
-    file_ptr_ = reinterpret_cast<RawFile*>(buf_);
-
-    strcpy(file_ptr_->f_name, filename_.c_str());
-    file_ptr_->f_name_len = filename.size();
-    if (truncate)
-      file_ptr_->f_size = 0;
-    file_ptr_->f_type = FTYPE_REG;
-    offset_ = file_ptr_->f_size;
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
+                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
   }
 
   ~PosixWritableFile() override {
-    int rc;
-    int compl_status = 0;
-
-    g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_write(g_namespaces->ns, g_namespaces->qpair, buf_,
-                           g_sect_per_blk * idx_, g_sect_per_blk,
-                           write_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk write failed\n");
-      exit(1);
-    }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
-
+    if (!closed_)
+      Close();
     spdk_free(buf_);
   }
 
@@ -477,16 +457,17 @@ class PosixWritableFile final : public WritableFile {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    assert(offset_ + write_size <= MAX_PAYLOAD);
-    memcpy(file_ptr_->f_payload + offset_, write_data, write_size);
+    assert(size_ + write_size <= BLK_SIZE);
+    memcpy(buf_ + size_, write_data, write_size);
 
-    offset_ += write_size;
-    file_ptr_->f_size += write_size;
+    size_ += write_size;
 
     return Status::OK();
   }
 
   Status Close() override {
+    Sync();
+    closed_ = true;
     return Status::OK();
   }
 
@@ -495,62 +476,17 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status Sync() override {
+    // TODO
     return Status::OK();
   }
 
  private:
-  // Ensures that all the caches associated with the given file descriptor's
-  // data are flushed all the way to durable media, and can withstand power
-  // failures.
-  //
-  // The path argument is only used to populate the description string in the
-  // returned Status if an error occurs.
-
-  // Returns the directory name in a path pointing to a file.
-  //
-  // Returns "." if the path does not contain any directory separator.
-  static std::string Dirname(const std::string& filename) {
-    std::string::size_type separator_pos = filename.rfind('/');
-    if (separator_pos == std::string::npos) {
-      return std::string(".");
-    }
-    // The filename component should not contain a path separator. If it does,
-    // the splitting was done incorrectly.
-    assert(filename.find('/', separator_pos + 1) == std::string::npos);
-
-    return filename.substr(0, separator_pos);
-  }
-
-  // Extracts the file name from a path pointing to a file.
-  //
-  // The returned Slice points to |filename|'s data buffer, so it is only valid
-  // while |filename| is alive and unchanged.
-  static Slice Basename(const std::string& filename) {
-    std::string::size_type separator_pos = filename.rfind('/');
-    if (separator_pos == std::string::npos) {
-      return Slice(filename);
-    }
-    // The filename component should not contain a path separator. If it does,
-    // the splitting was done incorrectly.
-    assert(filename.find('/', separator_pos + 1) == std::string::npos);
-
-    return Slice(filename.data() + separator_pos + 1,
-                 filename.length() - separator_pos - 1);
-  }
-
-  // True if the given file is a manifest file.
-  static bool IsManifest(const std::string& filename) {
-    return Basename(filename).starts_with("MANIFEST");
-  }
-
-  const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
-  const std::string dirname_;  // The directory of filename_.
-
   char* buf_;
-
-  off_t offset_;
+  uint32_t size_;
+  uint32_t synced_;
   int idx_;
+  bool closed_;
 };
 
 int LockOrUnlock(int fd, bool lock) {
@@ -623,6 +559,9 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+
     char* fbuf = static_cast<char*>(
                  spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                              SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
@@ -630,8 +569,6 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewSequentialFile malloc failed\n");
       exit(1);
     }
-    int idx = g_file_table[basename];
-    g_fs_mtx.Unlock();
     *result = new PosixSequentialFile(basename, fbuf, idx);
     return Status::OK();
   }
@@ -646,6 +583,9 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+
     char* fbuf = static_cast<char*>(
                  spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                              SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
@@ -653,65 +593,61 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewRandomAccessFile malloc failed\n");
       exit(1);
     }
-    int idx = g_file_table[basename];
-    g_fs_mtx.Unlock();
     *result = new PosixRandomAccessFile(basename, fbuf, idx);
     return Status::OK();
   }
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    char* fbuf;
-    int idx;
+    fprintf(stderr, "NewWritableFile %s\n", filename.c_str());
 
-    fprintf(stderr, "NewWriteFile %s\n", filename.c_str());
-
-    fbuf = static_cast<char*>(
-        spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-          SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "WriteFile zmalloc failed\n");
-      exit(1);
-    }
-
+    std::string basename = Basename(filename).ToString();
     g_fs_mtx.Lock();
-    if (!g_file_table.count(filename)) {
+    int idx;
+    if (!g_file_table.count(basename)) {
       idx = g_free_idx.front();
       g_free_idx.pop();
-      g_file_table.insert({filename, idx});
+      g_file_table.insert({basename, idx});
     } else {
-      idx = g_file_table[filename];
+      idx = g_file_table[basename];
     }
     g_fs_mtx.Unlock();
-    *result = new PosixWritableFile(filename, fbuf, idx, true);
+
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewWritableFile malloc failed\n");
+      exit(1);
+    }
+    *result = new PosixWritableFile(basename, fbuf, idx, true);
     return Status::OK();
   }
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    char* fbuf;
-    int idx;
+    fprintf(stderr, "NewAppendableFile %s\n", filename.c_str());
 
-    fprintf(stderr, "NewAppendFile %s\n", filename.c_str());
-
-    fbuf = static_cast<char*>(
-        spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-          SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "AppendFile zmalloc failed\n");
-      exit(1);
-    }
-
+    std::string basename = Basename(filename).ToString();
     g_fs_mtx.Lock();
-    if (!g_file_table.count(filename)) {
+    int idx;
+    if (!g_file_table.count(basename)) {
       idx = g_free_idx.front();
       g_free_idx.pop();
-      g_file_table.insert({filename, idx});
+      g_file_table.insert({basename, idx});
     } else {
-      idx = g_file_table[filename];
+      idx = g_file_table[basename];
     }
     g_fs_mtx.Unlock();
-    *result = new PosixWritableFile(filename, fbuf, idx, false);
+
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewAppendableFile malloc failed\n");
+      exit(1);
+    }
+    *result = new PosixWritableFile(basename, fbuf, idx, false);
     return Status::OK();
   }
 
