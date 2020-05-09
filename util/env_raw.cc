@@ -89,19 +89,24 @@ struct ns_entry {
   struct spdk_nvme_ns* ns;
   struct ns_entry* next;
   struct port::Mutex qpair_mtx;
-  struct spdk_nvme_qpair* qpair;      // guarded by qpair_mtx
-  struct spdk_nvme_qpair* qpair_comp; // for compaction thread
+  struct spdk_nvme_qpair* qpair;          // guarded by qpair_mtx
+  struct spdk_nvme_qpair* qpair_comp;     // for compaction thread
 };
 
 struct ctrlr_entry* g_controllers = NULL; // guarded by g_ns_mtx
 struct ns_entry* g_namespaces = NULL;     // guarded by g_ns_mtx
-struct port::Mutex g_ns_mtx;
+port::Mutex g_ns_mtx;
 
 int g_sectsize;
 int g_nsect;
 int g_sect_per_blk;
-void* g_sbbuf;        // guarded by fs_mutex
-SuperBlock* g_sb_ptr; // guarded by fs_mutex
+uint64_t g_dev_size;
+
+void* g_sbbuf;                            // guarded by g_fs_mtx
+SuperBlock* g_sb_ptr;                     // guarded by g_fs_mtx
+std::map<std::string, int> g_file_table;  // guarded by g_fs_mtx
+std::queue<int> g_free_idx;               // guarded by g_fs_mtx
+port::Mutex g_fs_mtx;
 
 thread_local bool compaction_thd = false;
 
@@ -206,7 +211,7 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 }
 
 void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                    void *buf, uint64_t lba, uint32_t cnt)
+                    void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
   int rc;
   int cpl;
@@ -215,12 +220,14 @@ void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
     fprintf(stderr, "spdk write failed\n");
     exit(1);
   }
+  if (!chk_completion)
+    return;
   while (!cpl)
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
 void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                 void *buf, uint64_t lba, uint32_t cnt)
+                 void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
   int rc;
   int cpl;
@@ -229,6 +236,8 @@ void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
     fprintf(stderr, "spdk read failed\n");
     exit(1);
   }
+  if (!chk_completion)
+    return;
   while (!cpl)
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
@@ -325,20 +334,19 @@ class PosixSequentialFile final : public SequentialFile {
  public:
   PosixSequentialFile(std::string filename, char* file_buf, int idx)
       : filename_(filename), buf_(file_buf), offset_(0), idx_(idx),
-        meta_(&g_sb_ptr->sb_meta[idx]) {
-    int rc;
-    int compl_status = 0;
-    g_ns_mtx.Lock();
-    spdk_nvme_ns_cmd_read(g_namespaces->ns, g_namespaces->qpair, buf_,
-                           g_sect_per_blk * idx_, g_sect_per_blk,
-                           read_complete, &compl_status, 0);
-    if (rc != 0) {
-      fprintf(stderr, "spdk read failed\n");
-      exit(1);
+        size_(g_sb_ptr->sb_meta[idx].f_size) {
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
     }
-    while (!compl_status)
-      spdk_nvme_qpair_process_completions(g_namespaces->qpair, 0);
-    g_ns_mtx.Unlock();
+    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
+                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
   }
   ~PosixSequentialFile() override {
     spdk_free(buf_);
@@ -346,7 +354,7 @@ class PosixSequentialFile final : public SequentialFile {
 
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
-    n = std::min(n, meta_->f_size - offset_);
+    n = std::min(n, size_ - offset_);
     memcpy(scratch, buf_ + offset_, n);
     *result = Slice(scratch, n);
     //*result = Slice(buf_ + offset_, n);
@@ -364,7 +372,7 @@ class PosixSequentialFile final : public SequentialFile {
  private:
   const std::string filename_;
   char* buf_;
-  FileMeta* meta_;
+  uint32_t size_;
   uint64_t offset_;
   int idx_;
 };
@@ -380,13 +388,19 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   // instance, and will be used to determine if .
   PosixRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
-        meta_(&g_sb_ptr->sb_meta[idx]) {
-    int rc;
-    int compl_status = 0;
-    g_ns_mtx.Lock();
-    read_to_buf(g_namespaces->ns, g_namespaces->qpair, buf_,
-                g_sect_per_blk * idx_, g_sect_per_blk);
-    g_ns_mtx.Unlock();
+        size_(g_sb_ptr->sb_meta[idx].f_size) {
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
+                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
   }
 
   ~PosixRandomAccessFile() override {
@@ -396,7 +410,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     Status status;
-    n = std::min(n, meta_->f_size - offset);
+    n = std::min(n, size_ - offset);
     memcpy(scratch, buf_ + offset, n);
     *result = Slice(scratch, n);
     return status;
@@ -405,7 +419,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  private:
   const std::string filename_;
   char* buf_;
-  FileMeta* meta_;
+  uint32_t size_;
   int idx_;
 };
 
@@ -601,49 +615,47 @@ class PosixEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
-    char* fbuf;
-    int idx;
     fprintf(stderr, "NewSequentialFile %s\n", filename.c_str());
-    fs_mutex_.Lock();
-    if (file_table_.count(filename)) {
-      fbuf = static_cast<char*>(
-                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-      if (fbuf == NULL) {
-        fprintf(stderr, "SeqFile zmalloc failed\n");
-        exit(1);
-      }
-      idx = file_table_[filename];
-      fs_mutex_.Unlock();
-    } else {
-      fs_mutex_.Unlock();
+
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
-    *result = new PosixSequentialFile(filename, fbuf, idx);
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewSequentialFile malloc failed\n");
+      exit(1);
+    }
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+    *result = new PosixSequentialFile(basename, fbuf, idx);
     return Status::OK();
   }
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
-    char* fbuf;
-    int idx;
     fprintf(stderr, "NewRandomFile %s\n", filename.c_str());
-    fs_mutex_.Lock();
-    if (file_table_.count(filename)) {
-      fbuf = static_cast<char*>(
-                    spdk_zmalloc(BLK_SIZE, 0x1000, static_cast<uint64_t*>(NULL),
-                                 SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-      if (fbuf == NULL) {
-        fprintf(stderr, "RandFile zmalloc failed\n");
-        exit(1);
-      }
-      idx = file_table_[filename];
-      fs_mutex_.Unlock();
-    } else {
-      fs_mutex_.Unlock();
+
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
-    *result = new PosixRandomAccessFile(filename, fbuf, idx);
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewRandomAccessFile malloc failed\n");
+      exit(1);
+    }
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+    *result = new PosixRandomAccessFile(basename, fbuf, idx);
     return Status::OK();
   }
 
@@ -662,15 +674,15 @@ class PosixEnv : public Env {
       exit(1);
     }
 
-    fs_mutex_.Lock();
-    if (!file_table_.count(filename)) {
-      idx = free_idx_.front();
-      free_idx_.pop();
-      file_table_.insert({filename, idx});
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(filename)) {
+      idx = g_free_idx.front();
+      g_free_idx.pop();
+      g_file_table.insert({filename, idx});
     } else {
-      idx = file_table_[filename];
+      idx = g_file_table[filename];
     }
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
     *result = new PosixWritableFile(filename, fbuf, idx, true);
     return Status::OK();
   }
@@ -690,23 +702,23 @@ class PosixEnv : public Env {
       exit(1);
     }
 
-    fs_mutex_.Lock();
-    if (!file_table_.count(filename)) {
-      idx = free_idx_.front();
-      free_idx_.pop();
-      file_table_.insert({filename, idx});
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(filename)) {
+      idx = g_free_idx.front();
+      g_free_idx.pop();
+      g_file_table.insert({filename, idx});
     } else {
-      idx = file_table_[filename];
+      idx = g_file_table[filename];
     }
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
     *result = new PosixWritableFile(filename, fbuf, idx, false);
     return Status::OK();
   }
 
   bool FileExists(const std::string& filename) override {
-    fs_mutex_.Lock();
-    bool ret = file_table_.count(filename);
-    fs_mutex_.Unlock();
+    g_fs_mtx.Lock();
+    bool ret = g_file_table.count(filename);
+    g_fs_mtx.Unlock();
 
     return ret;
   }
@@ -715,10 +727,10 @@ class PosixEnv : public Env {
                      std::vector<std::string>* result) override {
     result->clear();
 
-    fs_mutex_.Lock();
-    for (auto &it : file_table_)
+    g_fs_mtx.Lock();
+    for (auto &it : g_file_table)
       result->emplace_back(Basename(it.first).ToString());
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -726,14 +738,14 @@ class PosixEnv : public Env {
   Status DeleteFile(const std::string& filename) override {
     fprintf(stderr, "DeleteFile %s\n", filename.c_str());
 
-    fs_mutex_.Lock();
+    g_fs_mtx.Lock();
 
-    if (!file_table_.count(filename)) {
-      fs_mutex_.Unlock();
+    if (!g_file_table.count(filename)) {
+      g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
 
-    int idx = file_table_[filename];
+    int idx = g_file_table[filename];
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
     meta->f_size = 0;
@@ -752,16 +764,16 @@ class PosixEnv : public Env {
     assert(META_SIZE <= g_sectsize);
     uint64_t offset = idx * META_SIZE; // in bytes
     void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, true);
 
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
 
-    free_idx_.push(idx);
-    file_table_.erase(filename);
+    g_free_idx.push(idx);
+    g_file_table.erase(filename);
 
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -777,19 +789,19 @@ class PosixEnv : public Env {
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
     fprintf(stderr, "GetFileSize %s\n", filename.c_str());
 
-    fs_mutex_.Lock();
-    if (!file_table_.count(filename)) {
-      fs_mutex_.Unlock();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(filename)) {
+      g_fs_mtx.Unlock();
       return PosixError(filename, ENOENT);
     }
 
-    int idx = file_table_[filename];
+    int idx = g_file_table[filename];
 
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
     *size = meta->f_size;
 
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -797,18 +809,18 @@ class PosixEnv : public Env {
   Status RenameFile(const std::string& from, const std::string& to) override {
     fprintf(stderr, "RenameFile %s %s\n", from.c_str(), to.c_str());
 
-    fs_mutex_.Lock();
+    g_fs_mtx.Lock();
 
-    if (!file_table_.count(from)) {
-      fs_mutex_.Unlock();
+    if (!g_file_table.count(from)) {
+      g_fs_mtx.Unlock();
       return PosixError(from, ENOENT);
     }
 
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
     DeleteFile(to); // ignore error
-    fs_mutex_.Lock();
+    g_fs_mtx.Lock();
 
-    int idx = file_table_[from];
+    int idx = g_file_table[from];
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
     meta->f_name_len = to.size();
@@ -825,16 +837,16 @@ class PosixEnv : public Env {
     assert(META_SIZE <= g_sectsize);
     uint64_t offset = idx * META_SIZE; // in bytes
     void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, true);
 
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
 
-    file_table_[to] = file_table_[from];
-    file_table_.erase(from);
+    g_file_table[to] = g_file_table[from];
+    g_file_table.erase(from);
 
-    fs_mutex_.Unlock();
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -906,11 +918,6 @@ class PosixEnv : public Env {
       GUARDED_BY(background_work_mutex_);
 
   PosixLockTable locks_;  // Thread-safe.
-
-  uint64_t dev_size_;
-  std::map<std::string, int> file_table_; // guarded by fs_mutex_
-  std::queue<int> free_idx_; // guarded by fs_mutex_
-  port::Mutex fs_mutex_;
 };
 
 }  // namespace
@@ -930,14 +937,14 @@ PosixEnv::PosixEnv()
   }
   g_ns_mtx.Unlock();
 
-  fs_mutex_.Lock();
+  g_fs_mtx.Lock();
 
   struct ns_entry *ns_ent = g_namespaces;
   ns_ent->qpair_mtx.Lock();
 
-  read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk);
+  read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk, true);
 
-  dev_size_ = spdk_nvme_ns_get_size(ns_ent->ns);
+  g_dev_size = spdk_nvme_ns_get_size(ns_ent->ns);
 
   g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
   FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
@@ -947,25 +954,25 @@ PosixEnv::PosixEnv()
     for (int i = 1; i < BLK_CNT; i++) {
       FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
       if (meta_ent->f_name_len == 0) {
-        free_idx_.push(i);
+        g_free_idx.push(i);
       } else {
-        file_table_.insert({meta_ent->f_name, i});
+        g_file_table.insert({meta_ent->f_name, i});
       }
     }
   } else {
     memset(g_sbbuf, 0, BLK_SIZE);
     sb_meta->sb_magic = LDBFS_MAGIC;
 
-    write_from_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk);
+    write_from_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk, true);
     fprintf(stderr, "spdk sb write done\n");
 
     for (int i = 1; i < BLK_CNT; i++) {
-      free_idx_.push(i);
+      g_free_idx.push(i);
     }
   }
 
   ns_ent->qpair_mtx.Unlock();
-  fs_mutex_.Unlock();
+  g_fs_mtx.Unlock();
 }
 
 void PosixEnv::Schedule(
