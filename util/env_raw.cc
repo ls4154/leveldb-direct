@@ -642,6 +642,12 @@ class PosixEnv : public Env {
       idx = g_free_idx.front();
       g_free_idx.pop();
       g_file_table.insert({basename, idx});
+
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+      strcpy(meta->f_name, basename.c_str());
+      meta->f_name_len = basename.size();
+      meta->f_size = 0;
+      meta->f_next_blk = 0;
     } else {
       idx = g_file_table[basename];
     }
@@ -669,6 +675,12 @@ class PosixEnv : public Env {
       idx = g_free_idx.front();
       g_free_idx.pop();
       g_file_table.insert({basename, idx});
+
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+      strcpy(meta->f_name, basename.c_str());
+      meta->f_name_len = basename.size();
+      meta->f_size = 0;
+      meta->f_next_blk = 0;
     } else {
       idx = g_file_table[basename];
     }
