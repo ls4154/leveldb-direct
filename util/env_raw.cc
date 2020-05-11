@@ -88,7 +88,7 @@ struct ns_entry {
   struct spdk_nvme_ctrlr* ctrlr;
   struct spdk_nvme_ns* ns;
   struct ns_entry* next;
-  struct port::Mutex qpair_mtx;
+  port::Mutex qpair_mtx;
   struct spdk_nvme_qpair* qpair;          // guarded by qpair_mtx
   struct spdk_nvme_qpair* qpair_comp;     // for compaction thread
 };
@@ -126,7 +126,7 @@ void register_ns(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_ns* ns)
   if (!spdk_nvme_ns_is_active(ns))
     return;
 
-  entry = static_cast<ns_entry*>(malloc(sizeof(struct ns_entry)));
+  entry = new ns_entry;
   if (entry == NULL) {
     perror("ns_entry malloc");
     exit(1);
@@ -214,7 +214,7 @@ void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
                     void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
   int rc;
-  int cpl;
+  int cpl = 0;
   rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, &cpl, 0);
   if (rc != 0) {
     fprintf(stderr, "spdk write failed\n");
@@ -230,7 +230,7 @@ void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
                  void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
   int rc;
-  int cpl;
+  int cpl = 0;
   rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &cpl, 0);
   if (rc != 0) {
     fprintf(stderr, "spdk read failed\n");
@@ -502,8 +502,8 @@ class PosixWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
-    uint64_t lba = ROUND_DOWN(g_sect_per_blk * idx_ + synced_, g_sectsize) / 
-                   g_sectsize;
+    uint64_t lba = g_sect_per_blk * idx_ +
+                   ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
     uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, true);
@@ -786,7 +786,10 @@ class PosixEnv : public Env {
 
     g_fs_mtx.Lock();
 
-    if (!g_file_table.count(from)) {
+    std::string basename_from = Basename(from).ToString();
+    std::string basename_to = Basename(to).ToString();
+
+    if (!g_file_table.count(basename_from)) {
       g_fs_mtx.Unlock();
       return PosixError(from, ENOENT);
     }
@@ -795,8 +798,6 @@ class PosixEnv : public Env {
     DeleteFile(to); // ignore error
     g_fs_mtx.Lock();
 
-    std::string basename_from = Basename(from).ToString();
-    std::string basename_to = Basename(to).ToString();
 
     int idx = g_file_table[basename_from];
     FileMeta* meta = &g_sb_ptr->sb_meta[idx];
