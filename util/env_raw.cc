@@ -330,9 +330,9 @@ Slice Basename(const std::string& filename) {
 //
 // Instances of this class are thread-friendly but not thread-safe, as required
 // by the SequentialFile API.
-class PosixSequentialFile final : public SequentialFile {
+class RawSequentialFile final : public SequentialFile {
  public:
-  PosixSequentialFile(std::string filename, char* file_buf, int idx)
+  RawSequentialFile(std::string filename, char* file_buf, int idx)
       : filename_(filename), buf_(file_buf), offset_(0), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
@@ -348,7 +348,7 @@ class PosixSequentialFile final : public SequentialFile {
       ns_ent->qpair_mtx.Unlock();
     }
   }
-  ~PosixSequentialFile() override {
+  ~RawSequentialFile() override {
     spdk_free(buf_);
   }
 
@@ -382,11 +382,11 @@ class PosixSequentialFile final : public SequentialFile {
 // Instances of this class are thread-safe, as required by the RandomAccessFile
 // API. Instances are immutable and Read() only calls thread-safe library
 // functions.
-class PosixRandomAccessFile final : public RandomAccessFile {
+class RawRandomAccessFile final : public RandomAccessFile {
  public:
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
-  PosixRandomAccessFile(std::string filename, char* file_buf, int idx)
+  RawRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
@@ -403,7 +403,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
   }
 
-  ~PosixRandomAccessFile() override {
+  ~RawRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -423,9 +423,9 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   int idx_;
 };
 
-class PosixWritableFile final : public WritableFile {
+class RawWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
+  RawWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
       : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
         size_(g_sb_ptr->sb_meta[idx].f_size), synced_(size_) {
     if (truncate) {
@@ -447,7 +447,7 @@ class PosixWritableFile final : public WritableFile {
     }
   }
 
-  ~PosixWritableFile() override {
+  ~RawWritableFile() override {
     if (!closed_)
       Close();
     spdk_free(buf_);
@@ -603,7 +603,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewSequentialFile malloc failed\n");
       exit(1);
     }
-    *result = new PosixSequentialFile(basename, fbuf, idx);
+    *result = new RawSequentialFile(basename, fbuf, idx);
     return Status::OK();
   }
 
@@ -627,7 +627,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewRandomAccessFile malloc failed\n");
       exit(1);
     }
-    *result = new PosixRandomAccessFile(basename, fbuf, idx);
+    *result = new RawRandomAccessFile(basename, fbuf, idx);
     return Status::OK();
   }
 
@@ -654,7 +654,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewWritableFile malloc failed\n");
       exit(1);
     }
-    *result = new PosixWritableFile(basename, fbuf, idx, true);
+    *result = new RawWritableFile(basename, fbuf, idx, true);
     return Status::OK();
   }
 
@@ -681,7 +681,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewAppendableFile malloc failed\n");
       exit(1);
     }
-    *result = new PosixWritableFile(basename, fbuf, idx, false);
+    *result = new RawWritableFile(basename, fbuf, idx, false);
     return Status::OK();
   }
 
