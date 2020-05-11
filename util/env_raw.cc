@@ -38,7 +38,7 @@
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "util/env_posix_test_helper.h"
-#include "util/raw_logger.h"
+#include "util/posix_logger.h"
 
 extern "C" {
 #include "spdk/stdinc.h"
@@ -854,9 +854,14 @@ class PosixEnv : public Env {
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
-    std::FILE* fp = nullptr;
-    *result = new RawLogger(fp);
-    return Status::OK();
+    std::FILE* fp = std::fopen(filename.c_str(), "w");
+    if (fp == nullptr) {
+      *result = nullptr;
+      return PosixError(filename, errno);
+    } else {
+      *result = new PosixLogger(fp);
+      return Status::OK();
+    }
   }
 
   uint64_t NowMicros() override {
