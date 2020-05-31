@@ -3,6 +3,7 @@
 #define STORAGE_LEVELDB_INCLUDE_COMPACTSST_H_
 
 #include <string>
+#include <vector>
 
 #include "leveldb/env.h"
 #include "leveldb/export.h"
@@ -10,7 +11,10 @@
 
 namespace leveldb {
 
-LEVELDB_EXPORT Status CompactSST(Env* env);
+LEVELDB_EXPORT Status CompactSST(Env* env, std::vector<std::string>& in_files,
+                                           std::vector<std::string>& in_files2,
+                                           std::vector<std::string>& out_files,
+                                           uint64_t seqnum);
 
 }
 

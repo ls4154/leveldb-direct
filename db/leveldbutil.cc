@@ -3,6 +3,9 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include <stdio.h>
+#include <unistd.h>
+#include <string>
+#include <vector>
 
 #include "leveldb/dumpfile.h"
 #include "leveldb/compactsst.h"
@@ -36,6 +39,15 @@ bool HandleDumpCommand(Env* env, char** files, int num) {
   return ok;
 }
 
+// Parse comma seperated list
+bool ParseFileList(char* s, std::vector<std::string>& v) {
+  char* token = strtok(s, ", ");
+  while (token) {
+    v.push_back(token);
+    token = strtok(nullptr, ", ");
+  }
+  return true;
+}
 
 bool HandleCompactCommand(Env* env, char** argv, int argc) {
   if (argc < 4) {
@@ -43,7 +55,18 @@ bool HandleCompactCommand(Env* env, char** argv, int argc) {
     return false;
   }
 
-  Status s = CompactSST(env);
+  std::vector<std::string> in_files;
+  std::vector<std::string> in_files2;
+  std::vector<std::string> out_files;
+  uint64_t seqnum;
+
+  argv[0][0] = 'x';
+  ParseFileList(argv[0], in_files);
+  ParseFileList(argv[1], in_files2);
+  ParseFileList(argv[2], out_files);
+  seqnum = strtoull(argv[3], nullptr, 10);
+
+  Status s = CompactSST(env, in_files, in_files2, out_files, seqnum);
   if (!s.ok()) {
     fprintf(stderr, "%s\n", s.ToString().c_str());
     return false;
