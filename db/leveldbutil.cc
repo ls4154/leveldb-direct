@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "leveldb/dumpfile.h"
+#include "leveldb/compactsst.h"
 #include "leveldb/env.h"
 #include "leveldb/status.h"
 
@@ -35,13 +36,29 @@ bool HandleDumpCommand(Env* env, char** files, int num) {
   return ok;
 }
 
+
+bool HandleCompactCommand(Env* env, char** argv, int argc) {
+  if (argc < 4) {
+    fprintf(stderr, "compact: missing arguments\n");
+    return false;
+  }
+
+  Status s = CompactSST(env);
+  if (!s.ok()) {
+    fprintf(stderr, "%s\n", s.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 }  // namespace leveldb
 
 static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
-          "   dump files...         -- dump contents of specified files\n");
+          "   dump files...               -- dump contents of specified files\n"
+          "   compact infiles infiles2 outfiles sequence  -- compact sstables\n");
 }
 
 int main(int argc, char** argv) {
@@ -54,6 +71,8 @@ int main(int argc, char** argv) {
     std::string command = argv[1];
     if (command == "dump") {
       ok = leveldb::HandleDumpCommand(env, argv + 2, argc - 2);
+    } else if (command == "compact") {
+      ok = leveldb::HandleCompactCommand(env, argv + 2, argc - 2);
     } else {
       Usage();
       ok = false;
