@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <cstdlib>
 #include <stdio.h>
 #include <unistd.h>
 #include <string>
@@ -50,23 +51,24 @@ bool ParseFileList(char* s, std::vector<std::string>& v) {
 }
 
 bool HandleCompactCommand(Env* env, char** argv, int argc) {
-  if (argc < 4) {
+  if (argc < 5) {
     fprintf(stderr, "compact: missing arguments\n");
     return false;
   }
 
+  int level;
   std::vector<std::string> in_files;
   std::vector<std::string> in_files2;
   std::vector<std::string> out_files;
   uint64_t seqnum;
 
-  argv[0][0] = 'x';
-  ParseFileList(argv[0], in_files);
-  ParseFileList(argv[1], in_files2);
-  ParseFileList(argv[2], out_files);
-  seqnum = strtoull(argv[3], nullptr, 10);
+  level = atoi(argv[0]);
+  ParseFileList(argv[1], in_files);
+  ParseFileList(argv[2], in_files2);
+  ParseFileList(argv[3], out_files);
+  seqnum = strtoull(argv[4], nullptr, 10);
 
-  Status s = CompactSST(env, in_files, in_files2, out_files, seqnum);
+  Status s = CompactSST(env, level, in_files, in_files2, out_files, seqnum);
   if (!s.ok()) {
     fprintf(stderr, "%s\n", s.ToString().c_str());
     return false;
@@ -81,7 +83,7 @@ static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
           "   dump files...               -- dump contents of specified files\n"
-          "   compact infiles infiles2 outfiles sequence  -- compact sstables\n");
+          "   compact level infiles infiles2 outfiles sequence  -- compact sstables\n");
 }
 
 int main(int argc, char** argv) {
