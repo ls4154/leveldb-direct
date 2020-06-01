@@ -10,6 +10,7 @@
 #include "db/filename.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
+#include "leveldb/comparator.h"
 #include "leveldb/env.h"
 #include "leveldb/iterator.h"
 #include "leveldb/options.h"
@@ -32,6 +33,7 @@ struct CompactionInfo {
   int level;
   std::vector<TableMeta> inputs[2];
   std::vector<TableMeta> outputs;
+  SequenceNumber smallest_snapshot;
   InternalKeyComparator* icmp;
   TableCache* table_cache;
 };
@@ -137,6 +139,7 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
   ci->opts = new Options;
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->table_cache = new TableCache(dbname, *ci->opts, 100);
+  ci->smallest_snapshot = seqnum;
 
   fprintf(stderr, "Level %d: ", level);
   for (std::string& s : in_files) {
@@ -211,10 +214,73 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
 
     ci->inputs[1].push_back({fnum, fsize, ik_smallest, ik_largest});
   }
-
   fprintf(stderr, "\n");
 
+  for (std::string& s : out_files) {
+    uint64_t fnum;
+    uint64_t fsize;
+    FileType ftype;
+
+    ParseFileName(s, &fnum, &ftype);
+    assert(ftype == kTableFile);
+
+    fsize = 0;
+
+    ci->outputs.push_back({fnum, fsize, InternalKey(), InternalKey()});
+  }
+
   return ci;
+}
+
+bool DoCompaction(CompactionInfo* ci) {
+  Iterator* input = MakeInputIterator(ci);
+
+  input->SeekToFirst();
+
+  Status status;
+  ParsedInternalKey ikey;
+  std::string current_user_key;
+  bool has_current_user_key = false;
+  SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
+
+  const Comparator* ucmp = ci->icmp->user_comparator();
+
+  for (; input->Valid();) {
+    Slice key = input->key();
+
+    // TODO: check stop?
+
+    bool drop = false;
+    if (!ParseInternalKey(key, &ikey)) {
+      current_user_key.clear();
+      has_current_user_key = false;
+      last_sequence_for_key = kMaxSequenceNumber;
+    } else {
+      if (!has_current_user_key ||
+          ucmp->Compare(ikey.user_key, Slice(current_user_key)) !=
+              0) {
+        // First occurrence of this user key
+        current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
+        has_current_user_key = true;
+        last_sequence_for_key = kMaxSequenceNumber;
+      }
+
+      if (last_sequence_for_key <= ci->smallest_snapshot) {
+        // Hidden by an newer entry for same user key
+        drop = true;  // (A)
+      }
+      // TODO: check base level
+
+      last_sequence_for_key = ikey.sequence;
+    }
+
+    if (!drop) {
+    }
+
+    input->Next();
+  }
+
+  return true;
 }
 
 } // namespace
@@ -227,23 +293,10 @@ Status CompactSST(Env* env, int level, std::vector<std::string>& in_files,
 
   CompactionInfo* ci = MakeCompctionInfo(level, in_files, in_files2, out_files, seqnum);
 
-  Iterator* input = MakeInputIterator(ci);
-
-  input->SeekToFirst();
-
-  int cnt = 0;
-  for (; input->Valid(); input->Next()) {
-    Slice key = input->key();
-    ParsedInternalKey ikey;
-    if (!ParseInternalKey(key, &ikey)) {
-      fprintf(stderr, "error key\n");
-    } else {
-      printf("%s@%lu: ", ikey.user_key.ToString().c_str(), ikey.sequence);
-      printf("%s\n", input->value().ToString().c_str());
-    }
-    cnt++;
+  bool ok = DoCompaction(ci);
+  if (!ok) {
+    return Status::InvalidArgument("CompacSST error");
   }
-  printf("total count: %d\n", cnt);
 
   return Status::OK();
 }
