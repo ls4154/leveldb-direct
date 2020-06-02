@@ -1,4 +1,5 @@
 
+#include <bits/stdint-uintn.h>
 #include <stdint.h>
 #include <cassert>
 #include <stdio.h>
@@ -14,6 +15,7 @@
 #include "leveldb/env.h"
 #include "leveldb/iterator.h"
 #include "leveldb/options.h"
+#include "leveldb/table_builder.h"
 #include "table/merger.h"
 #include "table/two_level_iterator.h"
 #include "util/coding.h"
@@ -34,6 +36,7 @@ struct CompactionInfo {
   std::vector<TableMeta> inputs[2];
   std::vector<TableMeta> outputs;
   SequenceNumber smallest_snapshot;
+  uint64_t max_output_file_size;
   InternalKeyComparator* icmp;
   TableCache* table_cache;
 };
@@ -140,6 +143,7 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->table_cache = new TableCache(dbname, *ci->opts, 100);
   ci->smallest_snapshot = seqnum;
+  ci->max_output_file_size = 2 * 1024 * 1024;
 
   fprintf(stderr, "Level %d: ", level);
   for (std::string& s : in_files) {
@@ -215,11 +219,13 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
     ci->inputs[1].push_back({fnum, fsize, ik_smallest, ik_largest});
   }
   fprintf(stderr, "\n");
-
+  fprintf(stderr, "Outputs: ");
   for (std::string& s : out_files) {
     uint64_t fnum;
     uint64_t fsize;
     FileType ftype;
+
+    fprintf(stderr, "%s ", s.c_str());
 
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
@@ -228,12 +234,20 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
 
     ci->outputs.push_back({fnum, fsize, InternalKey(), InternalKey()});
   }
+  fprintf(stderr, "\n");
 
   return ci;
 }
 
 bool DoCompaction(CompactionInfo* ci) {
+  std::string dbname = "testdb";
+  Env* env = Env::Default();
+
   Iterator* input = MakeInputIterator(ci);
+  TableBuilder* builder;
+  WritableFile* outfile;
+  TableMeta* cur_output;
+  int out_cnt = 0;
 
   input->SeekToFirst();
 
@@ -275,10 +289,99 @@ bool DoCompaction(CompactionInfo* ci) {
     }
 
     if (!drop) {
+      if (builder == nullptr) {
+        cur_output = &ci->outputs[out_cnt++];
+        uint64_t fnum = cur_output->number;
+        std::string fname = TableFileName(dbname, fnum);
+        status = env->NewWritableFile(fname, &outfile);
+        if (!status.ok()) {
+          fprintf(stderr, "NewWritableFile error %s\n", fname.c_str());
+          exit(1);
+        }
+        builder = new TableBuilder(*ci->opts, outfile);
+      }
+      if (builder->NumEntries() == 0) {
+        cur_output->smallest.DecodeFrom(key);
+      }
+      cur_output->largest.DecodeFrom(key);
+      builder->Add(key, input->value());
+
+      if (builder->FileSize() >= ci->max_output_file_size) {
+        status = input->status();
+        if (!status.ok()) {
+          fprintf(stderr, "iterator error\n");
+          exit(1);
+        }
+        uint64_t num_entries = builder->NumEntries();
+        status = builder->Finish();
+        uint64_t file_size = builder->FileSize();
+        cur_output->file_size = file_size;
+        delete builder;
+        builder = nullptr;
+
+        if (!status.ok()) {
+          fprintf(stderr, "finish error\n");
+          exit(1);
+        }
+        status = outfile->Sync();
+        if (!status.ok()) {
+          fprintf(stderr, "sync error\n");
+          exit(1);
+        }
+        status = outfile->Close();
+        if (!status.ok()) {
+          fprintf(stderr, "close error\n");
+          exit(1);
+        }
+        delete outfile;
+        outfile = nullptr;
+
+        // TODO verify table
+        fprintf(stderr, "Generated table %lu, %ld keys, %ld bytes\n",
+                        cur_output->number, num_entries, file_size);
+      }
     }
 
     input->Next();
   }
+
+  if (builder != nullptr) {
+    status = input->status();
+    if (!status.ok()) {
+      fprintf(stderr, "iterator error\n");
+      exit(1);
+    }
+    uint64_t num_entries = builder->NumEntries();
+    status = builder->Finish();
+    uint64_t file_size = builder->FileSize();
+    cur_output->file_size = file_size;
+    delete builder;
+    builder = nullptr;
+
+    if (!status.ok()) {
+      fprintf(stderr, "finish error\n");
+      exit(1);
+    }
+    status = outfile->Sync();
+    if (!status.ok()) {
+      fprintf(stderr, "sync error\n");
+      exit(1);
+    }
+    status = outfile->Close();
+    if (!status.ok()) {
+      fprintf(stderr, "close error\n");
+      exit(1);
+    }
+    delete outfile;
+    outfile = nullptr;
+
+    // TODO verify table
+    fprintf(stderr, "Generated table %lu, %ld keys, %ld bytes\n",
+                    cur_output->number, num_entries, file_size);
+  }
+
+  delete input;
+  input = nullptr;
 
   return true;
 }
@@ -289,13 +392,20 @@ Status CompactSST(Env* env, int level, std::vector<std::string>& in_files,
                                        std::vector<std::string>& in_files2,
                                        std::vector<std::string>& out_files,
                                        uint64_t seqnum) {
-  fprintf(stderr, "CompactSST\n");
-
   CompactionInfo* ci = MakeCompctionInfo(level, in_files, in_files2, out_files, seqnum);
 
   bool ok = DoCompaction(ci);
   if (!ok) {
     return Status::InvalidArgument("CompacSST error");
+  }
+
+  for (TableMeta& tm : ci->outputs) {
+    if (tm.file_size == 0) {
+      continue;
+    }
+    fprintf(stderr, "File %lu %s .. %s\n", tm.number,
+                                      tm.smallest.user_key().ToString().c_str(),
+                                      tm.largest.user_key().ToString().c_str());
   }
 
   return Status::OK();
