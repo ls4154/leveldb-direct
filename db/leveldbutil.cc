@@ -56,19 +56,21 @@ bool HandleCompactCommand(Env* env, char** argv, int argc) {
     return false;
   }
 
+  std::string dbname;
   int level;
   std::vector<std::string> in_files;
   std::vector<std::string> in_files2;
   std::vector<std::string> out_files;
   uint64_t seqnum;
 
-  level = atoi(argv[0]);
-  ParseFileList(argv[1], in_files);
-  ParseFileList(argv[2], in_files2);
-  ParseFileList(argv[3], out_files);
-  seqnum = strtoull(argv[4], nullptr, 10);
+  dbname = argv[0];
+  level = atoi(argv[1]);
+  ParseFileList(argv[2], in_files);
+  ParseFileList(argv[3], in_files2);
+  ParseFileList(argv[4], out_files);
+  seqnum = strtoull(argv[5], nullptr, 10);
 
-  Status s = CompactSST(env, level, in_files, in_files2, out_files, seqnum);
+  Status s = CompactSST(env, dbname, level, in_files, in_files2, out_files, seqnum);
   if (!s.ok()) {
     fprintf(stderr, "%s\n", s.ToString().c_str());
     return false;
@@ -83,7 +85,7 @@ static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
           "   dump files...               -- dump contents of specified files\n"
-          "   compact level infiles infiles2 outfiles sequence  -- compact sstables\n");
+          "   compact dbname level infiles infiles2 outfiles sequence  -- compact sstables\n");
 }
 
 int main(int argc, char** argv) {

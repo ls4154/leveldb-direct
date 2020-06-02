@@ -128,21 +128,20 @@ Iterator* MakeInputIterator(CompactionInfo* c) {
   return result;
 }
 
-CompactionInfo* MakeCompctionInfo(Env* env, int level,
+CompactionInfo* MakeCompctionInfo(Env* env, std::string&dbname, int level,
                                             std::vector<std::string>& in_files,
                                             std::vector<std::string>& in_files2,
                                             std::vector<std::string>& out_files,
                                             uint64_t seqnum) {
   CompactionInfo* ci = new CompactionInfo;
 
-  std::string dbname = "testdb";
-
   ReadOptions ropts;
 
   ci->env = env;
   ci->opts = new Options;
+  ci->dbname = dbname;
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
-  ci->table_cache = new TableCache(dbname, *ci->opts, 100);
+  ci->table_cache = new TableCache(ci->dbname, *ci->opts, 100);
   ci->smallest_snapshot = seqnum;
   ci->max_output_file_size = 2 * 1024 * 1024;
 
@@ -157,7 +156,7 @@ CompactionInfo* MakeCompctionInfo(Env* env, int level,
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
 
-    std::string fname = TableFileName(dbname, fnum);
+    std::string fname = TableFileName(ci->dbname, fnum);
     Status status = ci->env->GetFileSize(fname, &fsize);
     if (!status.ok()) {
       fprintf(stderr, "\n%s not exists\n", fname.c_str());
@@ -196,7 +195,7 @@ CompactionInfo* MakeCompctionInfo(Env* env, int level,
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
 
-    std::string fname = TableFileName(dbname, fnum);
+    std::string fname = TableFileName(ci->dbname, fnum);
     Status status = ci->env->GetFileSize(fname, &fsize);
     if (!status.ok()) {
       fprintf(stderr, "\n%s not exists\n", fname.c_str());
@@ -241,13 +240,12 @@ CompactionInfo* MakeCompctionInfo(Env* env, int level,
 }
 
 bool DoCompaction(CompactionInfo* ci) {
-  std::string dbname = "testdb";
   Env* env = ci->env;
 
   Iterator* input = MakeInputIterator(ci);
-  TableBuilder* builder;
-  WritableFile* outfile;
-  TableMeta* cur_output;
+  TableBuilder* builder = nullptr;
+  WritableFile* outfile = nullptr;
+  TableMeta* cur_output = nullptr;
   int out_cnt = 0;
 
   input->SeekToFirst();
@@ -293,7 +291,7 @@ bool DoCompaction(CompactionInfo* ci) {
       if (builder == nullptr) {
         cur_output = &ci->outputs[out_cnt++];
         uint64_t fnum = cur_output->number;
-        std::string fname = TableFileName(dbname, fnum);
+        std::string fname = TableFileName(ci->dbname, fnum);
         status = env->NewWritableFile(fname, &outfile);
         if (!status.ok()) {
           fprintf(stderr, "NewWritableFile error %s\n", fname.c_str());
@@ -389,11 +387,12 @@ bool DoCompaction(CompactionInfo* ci) {
 
 } // namespace
 
-Status CompactSST(Env* env, int level, std::vector<std::string>& in_files,
-                                       std::vector<std::string>& in_files2,
-                                       std::vector<std::string>& out_files,
-                                       uint64_t seqnum) {
-  CompactionInfo* ci = MakeCompctionInfo(env, level, in_files, in_files2, out_files, seqnum);
+Status CompactSST(Env* env, std::string&dbname, int level,
+                            std::vector<std::string>& in_files,
+                            std::vector<std::string>& in_files2,
+                            std::vector<std::string>& out_files,
+                            uint64_t seqnum) {
+  CompactionInfo* ci = MakeCompctionInfo(env, dbname, level, in_files, in_files2, out_files, seqnum);
 
   bool ok = DoCompaction(ci);
   if (!ok) {
