@@ -31,7 +31,9 @@ struct TableMeta {
 };
 
 struct CompactionInfo {
+  Env* env;
   Options* opts;
+  std::string dbname;
   int level;
   std::vector<TableMeta> inputs[2];
   std::vector<TableMeta> outputs;
@@ -126,19 +128,18 @@ Iterator* MakeInputIterator(CompactionInfo* c) {
   return result;
 }
 
-CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
-                                             std::vector<std::string>& in_files2,
-                                             std::vector<std::string>& out_files,
-                                             uint64_t seqnum) {
-
-  Env* env = Env::Default();
-
+CompactionInfo* MakeCompctionInfo(Env* env, int level,
+                                            std::vector<std::string>& in_files,
+                                            std::vector<std::string>& in_files2,
+                                            std::vector<std::string>& out_files,
+                                            uint64_t seqnum) {
   CompactionInfo* ci = new CompactionInfo;
 
   std::string dbname = "testdb";
 
   ReadOptions ropts;
 
+  ci->env = env;
   ci->opts = new Options;
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->table_cache = new TableCache(dbname, *ci->opts, 100);
@@ -157,7 +158,7 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
     assert(ftype == kTableFile);
 
     std::string fname = TableFileName(dbname, fnum);
-    Status status = env->GetFileSize(fname, &fsize);
+    Status status = ci->env->GetFileSize(fname, &fsize);
     if (!status.ok()) {
       fprintf(stderr, "\n%s not exists\n", fname.c_str());
       exit(1);
@@ -196,7 +197,7 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
     assert(ftype == kTableFile);
 
     std::string fname = TableFileName(dbname, fnum);
-    Status status = env->GetFileSize(fname, &fsize);
+    Status status = ci->env->GetFileSize(fname, &fsize);
     if (!status.ok()) {
       fprintf(stderr, "\n%s not exists\n", fname.c_str());
       exit(1);
@@ -241,7 +242,7 @@ CompactionInfo* MakeCompctionInfo(int level, std::vector<std::string>& in_files,
 
 bool DoCompaction(CompactionInfo* ci) {
   std::string dbname = "testdb";
-  Env* env = Env::Default();
+  Env* env = ci->env;
 
   Iterator* input = MakeInputIterator(ci);
   TableBuilder* builder;
@@ -392,7 +393,7 @@ Status CompactSST(Env* env, int level, std::vector<std::string>& in_files,
                                        std::vector<std::string>& in_files2,
                                        std::vector<std::string>& out_files,
                                        uint64_t seqnum) {
-  CompactionInfo* ci = MakeCompctionInfo(level, in_files, in_files2, out_files, seqnum);
+  CompactionInfo* ci = MakeCompctionInfo(env, level, in_files, in_files2, out_files, seqnum);
 
   bool ok = DoCompaction(ci);
   if (!ok) {
