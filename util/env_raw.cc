@@ -53,14 +53,21 @@ namespace leveldb {
 #define LDBFS_MAGIC (0xe51ab1541542020full)
 #define BLK_SIZE (4ULL * 1024 * 1024)     // 4 MiB per block
 #define META_SIZE (128)
-#define BLK_CNT (BLK_SIZE / META_SIZE)    // maximum blocks in LDBFS
+//#define BLK_CNT (BLK_SIZE / META_SIZE)    // maximum blocks in LDBFS
+#define BLK_CNT (512)
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
+
+#define SECT_SIZE (16LL * 1024)
+#define SECT_PER_BLK (BLK_SIZE / SECTSIZE)
 
 #define BUF_ALIGN (0x1000)
 
 #define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
 #define ROUND_DOWN(N, S) ((N) / (S) * (S))
+
+#define SPDK_NVME_OPC_COSMOS_WRITE 0x81
+#define SPDK_NVME_OPC_COSMOS_READ  0x82
 
 struct FileMeta {
   union {
@@ -96,11 +103,6 @@ struct ns_entry {
 struct ctrlr_entry* g_controllers = NULL; // guarded by g_ns_mtx
 struct ns_entry* g_namespaces = NULL;     // guarded by g_ns_mtx
 port::Mutex g_ns_mtx;
-
-int g_sectsize;
-int g_nsect;
-int g_sect_per_blk;
-uint64_t g_dev_size;
 
 void* g_sbbuf;                            // guarded by g_fs_mtx
 SuperBlock* g_sb_ptr;                     // guarded by g_fs_mtx
@@ -287,15 +289,6 @@ void init_spdk(void)
     fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed (compaction)\n");
     exit(1);
   }
-
-  g_sectsize = spdk_nvme_ns_get_sector_size(ns_ent->ns);
-  g_nsect = spdk_nvme_ns_get_num_sectors(ns_ent->ns);
-  assert(BLK_SIZE % g_sectsize == 0);
-  g_sect_per_blk = BLK_SIZE / g_sectsize;
-
-  fprintf(stderr, "nvme sector size %d\n", g_sectsize);
-  fprintf(stderr, "nvme ns sector count %d\n", g_nsect);
-  fprintf(stderr, "sectors per block %d\n", g_sect_per_blk);
 }
 
 namespace {
@@ -342,8 +335,8 @@ class RawSequentialFile final : public SequentialFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+    read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
+                ROUND_UP(size_, SECTSIZE) / SECTSIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -396,8 +389,8 @@ class RawRandomAccessFile final : public RandomAccessFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+    read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
+                ROUND_UP(size_, SECTSIZE) / SECTSIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -440,8 +433,8 @@ class RawWritableFile final : public WritableFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+    read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
+                ROUND_UP(size_, SECTSIZE) / SECTSIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -476,8 +469,8 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     uint64_t offset = idx_ * META_SIZE;
-    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    uint64_t lba = ROUND_DOWN(offset, g_sectsize) / g_sectsize;
+    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECTSIZE);
+    uint64_t lba = ROUND_DOWN(offset, SECTSIZE) / SECTSIZE;
     write_from_buf(ns, qpair, meta_buf, lba, 1, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -501,10 +494,10 @@ class RawWritableFile final : public WritableFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
-    uint64_t lba = g_sect_per_blk * idx_ +
-                   ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
-    uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
+    char* target_buf = buf_ + ROUND_DOWN(synced_, SECTSIZE);
+    uint64_t lba = SECT_PER_BLK * idx_ +
+                   ROUND_DOWN(synced_, SECTSIZE) / SECTSIZE;
+    uint32_t cnt = ROUND_UP(size_ - synced_, SECTSIZE) / SECTSIZE;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, true);
     if (!compaction_thd) {
@@ -746,10 +739,10 @@ class PosixEnv : public Env {
       qpair = ns_ent->qpair;
     }
 
-    assert(META_SIZE <= g_sectsize);
+    assert(META_SIZE <= SECTSIZE);
     uint64_t offset = idx * META_SIZE; // in bytes
-    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, true);
+    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECTSIZE);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECTSIZE) / SECTSIZE, 1, true);
 
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -825,10 +818,10 @@ class PosixEnv : public Env {
       qpair = ns_ent->qpair;
     }
 
-    assert(META_SIZE <= g_sectsize);
+    assert(META_SIZE <= SECTSIZE);
     uint64_t offset = idx * META_SIZE; // in bytes
-    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, true);
+    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECTSIZE);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECTSIZE) / SECTSIZE, 1, true);
 
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -938,9 +931,7 @@ PosixEnv::PosixEnv()
   struct ns_entry *ns_ent = g_namespaces;
   ns_ent->qpair_mtx.Lock();
 
-  read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk, true);
-
-  g_dev_size = spdk_nvme_ns_get_size(ns_ent->ns);
+  read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, SECT_PER_BLK, true);
 
   g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
   FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
@@ -959,7 +950,7 @@ PosixEnv::PosixEnv()
     memset(g_sbbuf, 0, BLK_SIZE);
     sb_meta->sb_magic = LDBFS_MAGIC;
 
-    write_from_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, g_sect_per_blk, true);
+    write_from_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, SECT_PER_BLK, true);
     fprintf(stderr, "spdk sb write done\n");
 
     for (int i = 1; i < BLK_CNT; i++) {
