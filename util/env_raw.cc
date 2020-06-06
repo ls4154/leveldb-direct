@@ -58,7 +58,7 @@ namespace leveldb {
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
-#define SECT_SIZE (16LL * 1024)
+#define SECT_SIZE (4ULL * 1024)
 #define SECT_PER_BLK (BLK_SIZE / SECTSIZE)
 
 #define BUF_ALIGN (0x1000)
@@ -68,6 +68,48 @@ namespace leveldb {
 
 #define SPDK_NVME_OPC_COSMOS_WRITE 0x81
 #define SPDK_NVME_OPC_COSMOS_READ  0x82
+
+struct spdk_nvme_obj_cmd {
+  /* dword 0 */
+  uint16_t opc	:  8;	/* opcode */
+  uint16_t fuse	:  2;	/* fused operation */
+  uint16_t rsvd1	:  4;
+  uint16_t psdt	:  2;
+  uint16_t cid;		/* command identifier */
+
+  /* dword 1 */
+  uint32_t nsid;		/* namespace identifier */
+
+  /* dword 2-3 */
+  uint32_t buf_addr_lo;
+  uint32_t buf_addr_hi;
+
+  /* dword 4-5 */
+  uint64_t mptr;		/* metadata pointer */
+
+  /* dword 6-9: data pointer */
+  union {
+    struct {
+      uint64_t prp1;		/* prp entry 1 */
+      uint64_t prp2;		/* prp entry 2 */
+    } prp;
+
+    struct spdk_nvme_sgl_descriptor sgl1;
+  } dptr;
+
+  /* dword 10 */
+  uint32_t key;
+
+  /* dowrd 11 */
+  uint32_t cdw11;
+
+  /* dword 12-15 */
+  uint32_t sect_cnt;
+  uint32_t cdw13;
+  uint32_t cdw14;
+  uint32_t cdw15;
+};
+static_assert(sizeof(struct spdk_nvme_obj_cmd) == 64, "nvme cmd incorrect size");
 
 struct FileMeta {
   union {
@@ -175,24 +217,24 @@ void attach_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
 
 void cleanup(void)
 {
-  struct ns_entry *ns_entry = g_namespaces;
-  struct ctrlr_entry *ctrlr_entry = g_controllers;
+  struct ns_entry* ns_entry = g_namespaces;
+  struct ctrlr_entry* ctrlr_entry = g_controllers;
 
   while (ns_entry) {
-    struct ns_entry *next = ns_entry->next;
+    struct ns_entry* next = ns_entry->next;
     free(ns_entry);
     ns_entry = next;
   }
 
   while (ctrlr_entry) {
-    struct ctrlr_entry *next = ctrlr_entry->next;
+    struct ctrlr_entry* next = ctrlr_entry->next;
     spdk_nvme_detach(ctrlr_entry->ctrlr);
     free(ctrlr_entry);
     ctrlr_entry = next;
   }
 }
 
-void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
+void write_complete(void* arg, const struct spdk_nvme_cpl* completion)
 {
   int* compl_status = static_cast<int*>(arg);
   *compl_status = 1;
@@ -202,7 +244,7 @@ void write_complete(void *arg, const struct spdk_nvme_cpl *completion)
   }
 }
 
-void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
+void read_complete(void* arg, const struct spdk_nvme_cpl* completion)
 {
   int* compl_status = static_cast<int*>(arg);
   *compl_status = 1;
@@ -212,8 +254,8 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
   }
 }
 
-void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                    void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
+void write_from_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
+                    void* buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
@@ -228,14 +270,50 @@ void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
-void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                 void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
+void read_to_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
+                 void* buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
   rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &cpl, 0);
   if (rc != 0) {
     fprintf(stderr, "spdk read failed\n");
+    exit(1);
+  }
+  if (!chk_completion)
+    return;
+  while (!cpl)
+    spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
+void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
+                        void*buf, uint32_t key, uint32_t, cnt, bool chk_completion)
+{
+  int rc;
+  int cpl = 0;
+  struct spdk_nvme_obj_cmd obj_cmd = { 0, };
+  rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, &obj_cmd,
+                                                   obj_write_complete, &cpl);
+  if (rc != 0) {
+    fprintf(stderr, "spdk io raw write failed\n");
+    exit(1);
+  }
+  if (!chk_completion)
+    return;
+  while (!cpl)
+    spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
+void obj_read_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
+                       void*buf, uint32_t key, uint32_t, cnt, bool chk_completion)
+{
+  int rc;
+  int cpl = 0;
+  struct spdk_nvme_obj_cmd obj_cmd = { 0, };
+  rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, &obj_cmd,
+                                                   obj_read_complete, &cpl);
+  if (rc != 0) {
+    fprintf(stderr, "spdk io raw readfailed\n");
     exit(1);
   }
   if (!chk_completion)
@@ -581,6 +659,9 @@ class PosixEnv : public Env {
     fprintf(stderr, "NewSequentialFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+    // TODO: check sstable file
+
     g_fs_mtx.Lock();
     if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
@@ -605,6 +686,9 @@ class PosixEnv : public Env {
     fprintf(stderr, "NewRandomFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+    // TODO: check sstable file
+
     g_fs_mtx.Lock();
     if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
@@ -629,6 +713,9 @@ class PosixEnv : public Env {
     fprintf(stderr, "NewWritableFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+    // TODO: check sstable file
+
     g_fs_mtx.Lock();
     int idx;
     if (!g_file_table.count(basename)) {
@@ -662,6 +749,9 @@ class PosixEnv : public Env {
     fprintf(stderr, "NewAppendableFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+    // TODO: check sstable file
+
     g_fs_mtx.Lock();
     int idx;
     if (!g_file_table.count(basename)) {
