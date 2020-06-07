@@ -286,12 +286,19 @@ void read_to_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
+// TODO: offset support
 void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                        void*buf, uint32_t key, uint32_t, cnt, bool chk_completion)
+                        void* buf, uint32_t key, uint32_t, cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
   struct spdk_nvme_obj_cmd obj_cmd = { 0, };
+  obj_cmd.opc = SPDK_NVME_OPC_COSMOS_WRITE;
+  obj_cmd.buf_addr_lo = ((uint64_t)buf & 0xFFFFFFFFULL);
+  obj_cmd.buf_addr_hi = ((uint64_t)buf >> 32);
+  obj_cmd.key = key;
+  obj_cmd.sect_cnt = cnt - 1;
+
   rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, &obj_cmd,
                                                    obj_write_complete, &cpl);
   if (rc != 0) {
@@ -305,11 +312,17 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
 }
 
 void obj_read_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                       void*buf, uint32_t key, uint32_t, cnt, bool chk_completion)
+                       void* buf, uint32_t key, uint32_t, cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
   struct spdk_nvme_obj_cmd obj_cmd = { 0, };
+  obj_cmd.opc = SPDK_NVME_OPC_COSMOS_READ;
+  obj_cmd.buf_addr_lo = ((uint64_t)buf & 0xFFFFFFFFULL);
+  obj_cmd.buf_addr_hi = ((uint64_t)buf >> 32);
+  obj_cmd.key = key;
+  obj_cmd.sect_cnt = cnt - 1;
+
   rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, &obj_cmd,
                                                    obj_read_complete, &cpl);
   if (rc != 0) {
