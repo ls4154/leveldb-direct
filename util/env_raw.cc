@@ -1288,8 +1288,6 @@ class PosixEnv : public Env {
   Status RenameFile(const std::string& from, const std::string& to) override {
     fprintf(stderr, "RenameFile %s %s\n", from.c_str(), to.c_str());
 
-    g_fs_mtx.Lock();
-
     std::string basename_from = Basename(from).ToString();
     std::string basename_to = Basename(to).ToString();
 
@@ -1297,6 +1295,8 @@ class PosixEnv : public Env {
     FileType ftype;
     ParseFileName(basename_from, &fnum, &ftype);
     if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+
       if (!g_file_table.count(basename_from)) {
         g_fs_mtx.Unlock();
         return PosixError(from, ENOENT);
