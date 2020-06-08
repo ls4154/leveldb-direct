@@ -4,6 +4,8 @@
 #include <cassert>
 #include <stdio.h>
 
+#include <sys/time.h>
+
 #include "leveldb/compactsst.h"
 
 #include "db/dbformat.h"
@@ -394,7 +396,10 @@ Status CompactSST(Env* env, std::string&dbname, int level,
                             uint64_t seqnum) {
   CompactionInfo* ci = MakeCompctionInfo(env, dbname, level, in_files, in_files2, out_files, seqnum);
 
+  struct timeval tv1, tv2;
+  gettimeofday(&tv1, NULL);
   bool ok = DoCompaction(ci);
+  gettimeofday(&tv2, NULL);
   if (!ok) {
     return Status::InvalidArgument("CompacSST error");
   }
@@ -407,6 +412,8 @@ Status CompactSST(Env* env, std::string&dbname, int level,
                                       tm.smallest.user_key().ToString().c_str(),
                                       tm.largest.user_key().ToString().c_str());
   }
+
+  fprintf(stderr, "Compaction time %lu us\n", (tv2.tv_sec - tv1.tv_sec) * 1000000 + tv2.tv_usec - tv1.tv_usec);
 
   return Status::OK();
 }
