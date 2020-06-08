@@ -309,7 +309,7 @@ void read_to_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
 
 // TODO: offset support
 void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                        void* buf, uint32_t key, uint32_t, int cnt, bool chk_completion)
+                        void* buf, uint32_t key, uint32_t cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
@@ -334,8 +334,8 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
-void obj_read_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                       void* buf, uint32_t key, uint32_t, int cnt, bool chk_completion)
+void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
+                       void* buf, uint32_t key, uint32_t cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
@@ -707,14 +707,13 @@ class RawSequentialFile final : public SequentialFile {
       : filename_(filename), buf_(file_buf), offset_(0), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
-                ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -755,14 +754,13 @@ class RawRandomAccessFile final : public RandomAccessFile {
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
-                ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -799,14 +797,13 @@ class RawWritableFile final : public WritableFile {
       return;
     }
     struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
-                ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -1440,7 +1437,7 @@ PosixEnv::PosixEnv()
   struct ns_entry *ns_ent = g_namespaces;
   ns_ent->qpair_mtx.Lock();
 
-  read_to_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, SECT_PER_BLK, true);
+  obj_read_to_buf(ns_ent->ctrlr, ns_ent->qpair, g_sbbuf, 0, SECT_PER_BLK, true);
 
   g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
   FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
