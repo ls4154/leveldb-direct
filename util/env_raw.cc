@@ -796,10 +796,9 @@ class RawWritableFile final : public WritableFile {
  public:
   RawWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
       : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
-        size_(g_sb_ptr->sb_meta[idx].f_size), synced_(size_) {
+        size_(g_sb_ptr->sb_meta[idx].f_size) {
     if (truncate) {
       size_ = 0;
-      synced_ = 0;
       return;
     }
     struct ns_entry* ns_ent = g_namespaces;
@@ -850,7 +849,6 @@ class RawWritableFile final : public WritableFile {
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
-    Sync();
     closed_ = true;
     return Status::OK();
   }
@@ -860,25 +858,20 @@ class RawWritableFile final : public WritableFile {
   }
 
   Status Sync() override {
-    if (synced_ == size_)
-      return Status::OK();
     struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_ns* ns = ns_ent->ns;
     struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    char* target_buf = buf_ + ROUND_DOWN(synced_, SECT_SIZE);
-    uint64_t lba = SECT_PER_BLK * idx_ +
-                   ROUND_DOWN(synced_, SECT_SIZE) / SECT_SIZE;
-    uint32_t cnt = ROUND_UP(size_ - synced_, SECT_SIZE) / SECT_SIZE;
+    uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
 
-    write_from_buf(ns, qpair, target_buf, lba, cnt, true);
+    obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
-    synced_ = size_;
     return Status::OK();
   }
 
@@ -886,7 +879,6 @@ class RawWritableFile final : public WritableFile {
   const std::string filename_;
   char* buf_;
   uint32_t size_;
-  uint32_t synced_;
   int idx_;
   bool closed_;
 };
