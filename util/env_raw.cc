@@ -414,6 +414,268 @@ Slice Basename(const std::string& filename) {
 //
 // Instances of this class are thread-friendly but not thread-safe, as required
 // by the SequentialFile API.
+class PosixSequentialFile final : public SequentialFile {
+ public:
+  PosixSequentialFile(std::string filename, int fd)
+      : fd_(fd), filename_(filename) {}
+  ~PosixSequentialFile() override { close(fd_); }
+
+  Status Read(size_t n, Slice* result, char* scratch) override {
+    Status status;
+    while (true) {
+      ::ssize_t read_size = ::read(fd_, scratch, n);
+      if (read_size < 0) {  // Read error.
+        if (errno == EINTR) {
+          continue;  // Retry
+        }
+        status = PosixError(filename_, errno);
+        break;
+      }
+      *result = Slice(scratch, read_size);
+      break;
+    }
+    return status;
+  }
+
+  Status Skip(uint64_t n) override {
+    if (::lseek(fd_, n, SEEK_CUR) == static_cast<off_t>(-1)) {
+      return PosixError(filename_, errno);
+    }
+    return Status::OK();
+  }
+
+ private:
+  const int fd_;
+  const std::string filename_;
+};
+
+// Implements random read access in a file using mmap().
+//
+// Instances of this class are thread-safe, as required by the RandomAccessFile
+// API. Instances are immutable and Read() only calls thread-safe library
+// functions.
+class PosixMmapReadableFile final : public RandomAccessFile {
+ public:
+  // mmap_base[0, length-1] points to the memory-mapped contents of the file. It
+  // must be the result of a successful call to mmap(). This instances takes
+  // over the ownership of the region.
+  PosixMmapReadableFile(std::string filename, char* mmap_base, size_t length)
+      : mmap_base_(mmap_base),
+        length_(length),
+        filename_(std::move(filename)) {}
+
+  ~PosixMmapReadableFile() override {
+    ::munmap(static_cast<void*>(mmap_base_), length_);
+  }
+
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch) const override {
+    if (offset + n > length_) {
+      *result = Slice();
+      return PosixError(filename_, EINVAL);
+    }
+
+    *result = Slice(mmap_base_ + offset, n);
+    return Status::OK();
+  }
+
+ private:
+  char* const mmap_base_;
+  const size_t length_;
+  const std::string filename_;
+};
+
+class PosixWritableFile final : public WritableFile {
+ public:
+  PosixWritableFile(std::string filename, int fd)
+      : pos_(0),
+        fd_(fd),
+        is_manifest_(IsManifest(filename)),
+        filename_(std::move(filename)),
+        dirname_(Dirname(filename_)) {}
+
+  ~PosixWritableFile() override {
+    if (fd_ >= 0) {
+      // Ignoring any potential errors
+      Close();
+    }
+  }
+
+  Status Append(const Slice& data) override {
+    size_t write_size = data.size();
+    const char* write_data = data.data();
+
+    // Fit as much as possible into buffer.
+    size_t copy_size = std::min(write_size, kWritableFileBufferSize - pos_);
+    std::memcpy(buf_ + pos_, write_data, copy_size);
+    write_data += copy_size;
+    write_size -= copy_size;
+    pos_ += copy_size;
+    if (write_size == 0) {
+      return Status::OK();
+    }
+
+    // Can't fit in buffer, so need to do at least one write.
+    Status status = FlushBuffer();
+    if (!status.ok()) {
+      return status;
+    }
+
+    // Small writes go to buffer, large writes are written directly.
+    if (write_size < kWritableFileBufferSize) {
+      std::memcpy(buf_, write_data, write_size);
+      pos_ = write_size;
+      return Status::OK();
+    }
+    return WriteUnbuffered(write_data, write_size);
+  }
+
+  Status Close() override {
+    Status status = FlushBuffer();
+    const int close_result = ::close(fd_);
+    if (close_result < 0 && status.ok()) {
+      status = PosixError(filename_, errno);
+    }
+    fd_ = -1;
+    return status;
+  }
+
+  Status Flush() override { return FlushBuffer(); }
+
+  Status Sync() override {
+    // Ensure new files referred to by the manifest are in the filesystem.
+    //
+    // This needs to happen before the manifest file is flushed to disk, to
+    // avoid crashing in a state where the manifest refers to files that are not
+    // yet on disk.
+    Status status = SyncDirIfManifest();
+    if (!status.ok()) {
+      return status;
+    }
+
+    status = FlushBuffer();
+    if (!status.ok()) {
+      return status;
+    }
+
+    return SyncFd(fd_, filename_);
+  }
+
+ private:
+  Status FlushBuffer() {
+    Status status = WriteUnbuffered(buf_, pos_);
+    pos_ = 0;
+    return status;
+  }
+
+  Status WriteUnbuffered(const char* data, size_t size) {
+    while (size > 0) {
+      ssize_t write_result = ::write(fd_, data, size);
+      if (write_result < 0) {
+        if (errno == EINTR) {
+          continue;  // Retry
+        }
+        return PosixError(filename_, errno);
+      }
+      data += write_result;
+      size -= write_result;
+    }
+    return Status::OK();
+  }
+
+  Status SyncDirIfManifest() {
+    Status status;
+    if (!is_manifest_) {
+      return status;
+    }
+
+    int fd = ::open(dirname_.c_str(), O_RDONLY);
+    if (fd < 0) {
+      status = PosixError(dirname_, errno);
+    } else {
+      status = SyncFd(fd, dirname_);
+      ::close(fd);
+    }
+    return status;
+  }
+
+  // Ensures that all the caches associated with the given file descriptor's
+  // data are flushed all the way to durable media, and can withstand power
+  // failures.
+  //
+  // The path argument is only used to populate the description string in the
+  // returned Status if an error occurs.
+  static Status SyncFd(int fd, const std::string& fd_path) {
+#if HAVE_FULLFSYNC
+    // On macOS and iOS, fsync() doesn't guarantee durability past power
+    // failures. fcntl(F_FULLFSYNC) is required for that purpose. Some
+    // filesystems don't support fcntl(F_FULLFSYNC), and require a fallback to
+    // fsync().
+    if (::fcntl(fd, F_FULLFSYNC) == 0) {
+      return Status::OK();
+    }
+#endif  // HAVE_FULLFSYNC
+
+#if HAVE_FDATASYNC
+    bool sync_success = ::fdatasync(fd) == 0;
+#else
+    bool sync_success = ::fsync(fd) == 0;
+#endif  // HAVE_FDATASYNC
+
+    if (sync_success) {
+      return Status::OK();
+    }
+    return PosixError(fd_path, errno);
+  }
+
+  // Returns the directory name in a path pointing to a file.
+  //
+  // Returns "." if the path does not contain any directory separator.
+  static std::string Dirname(const std::string& filename) {
+    std::string::size_type separator_pos = filename.rfind('/');
+    if (separator_pos == std::string::npos) {
+      return std::string(".");
+    }
+    // The filename component should not contain a path separator. If it does,
+    // the splitting was done incorrectly.
+    assert(filename.find('/', separator_pos + 1) == std::string::npos);
+
+    return filename.substr(0, separator_pos);
+  }
+
+  // Extracts the file name from a path pointing to a file.
+  //
+  // The returned Slice points to |filename|'s data buffer, so it is only valid
+  // while |filename| is alive and unchanged.
+  static Slice Basename(const std::string& filename) {
+    std::string::size_type separator_pos = filename.rfind('/');
+    if (separator_pos == std::string::npos) {
+      return Slice(filename);
+    }
+    // The filename component should not contain a path separator. If it does,
+    // the splitting was done incorrectly.
+    assert(filename.find('/', separator_pos + 1) == std::string::npos);
+
+    return Slice(filename.data() + separator_pos + 1,
+                 filename.length() - separator_pos - 1);
+  }
+
+  // True if the given file is a manifest file.
+  static bool IsManifest(const std::string& filename) {
+    return Basename(filename).starts_with("MANIFEST");
+  }
+
+  // buf_[0, pos_ - 1] contains data to be written to fd_.
+  char buf_[kWritableFileBufferSize];
+  size_t pos_;
+  int fd_;
+
+  const bool is_manifest_;  // True if the file's name starts with MANIFEST.
+  const std::string filename_;
+  const std::string dirname_;  // The directory of filename_.
+};
+
+// Implements sequential read access in a file using SPDK io cmd.
 class RawSequentialFile final : public SequentialFile {
  public:
   RawSequentialFile(std::string filename, char* file_buf, int idx)
@@ -461,15 +723,9 @@ class RawSequentialFile final : public SequentialFile {
   int idx_;
 };
 
-// Implements random read access in a file using pread().
-//
-// Instances of this class are thread-safe, as required by the RandomAccessFile
-// API. Instances are immutable and Read() only calls thread-safe library
-// functions.
+// Implements random read access in a file using SPDK io cmd.
 class RawRandomAccessFile final : public RandomAccessFile {
  public:
-  // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
-  // instance, and will be used to determine if .
   RawRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
