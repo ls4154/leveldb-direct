@@ -313,10 +313,13 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
 {
   int rc;
   int cpl = 0;
+
+  uint64_t paddr = spdk_vtophys(buf, NULL);
+
   struct spdk_nvme_obj_cmd obj_cmd = { 0, };
   obj_cmd.opc = SPDK_NVME_OPC_COSMOS_WRITE;
-  obj_cmd.buf_addr_lo = ((uint64_t)buf & 0xFFFFFFFFULL);
-  obj_cmd.buf_addr_hi = ((uint64_t)buf >> 32);
+  obj_cmd.buf_addr_lo = (paddr & 0xFFFFFFFFULL);
+  obj_cmd.buf_addr_hi = (paddr >> 32);
   obj_cmd.key = key;
   obj_cmd.sect_cnt = cnt - 1;
 
@@ -339,10 +342,13 @@ void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpai
 {
   int rc;
   int cpl = 0;
+
+  uint64_t paddr = spdk_vtophys(buf, NULL);
+
   struct spdk_nvme_obj_cmd obj_cmd = { 0, };
   obj_cmd.opc = SPDK_NVME_OPC_COSMOS_READ;
-  obj_cmd.buf_addr_lo = ((uint64_t)buf & 0xFFFFFFFFULL);
-  obj_cmd.buf_addr_hi = ((uint64_t)buf >> 32);
+  obj_cmd.buf_addr_lo = (paddr & 0xFFFFFFFFULL);
+  obj_cmd.buf_addr_hi = (paddr >> 32);
   obj_cmd.key = key;
   obj_cmd.sect_cnt = cnt - 1;
 
