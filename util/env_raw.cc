@@ -32,6 +32,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "db/filename.h"
 #include "leveldb/env.h"
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
@@ -59,7 +60,7 @@ namespace leveldb {
 #define MAX_NAMELEN (META_SIZE - 8)
 
 #define SECT_SIZE (4ULL * 1024)
-#define SECT_PER_BLK (BLK_SIZE / SECTSIZE)
+#define SECT_PER_BLK (BLK_SIZE / SECT_SIZE)
 
 #define BUF_ALIGN (0x1000)
 
@@ -254,6 +255,26 @@ void read_complete(void* arg, const struct spdk_nvme_cpl* completion)
   }
 }
 
+void obj_write_complete(void* arg, const struct spdk_nvme_cpl* completion)
+{
+  int* compl_status = static_cast<int*>(arg);
+  *compl_status = 1;
+  if (spdk_nvme_cpl_is_error(completion)) {
+    fprintf(stderr, "spdk write cpl error\n");
+    *compl_status = 2;
+  }
+}
+
+void obj_read_complete(void* arg, const struct spdk_nvme_cpl* completion)
+{
+  int* compl_status = static_cast<int*>(arg);
+  *compl_status = 1;
+  if (spdk_nvme_cpl_is_error(completion)) {
+    fprintf(stderr, "spdk read cpl error\n");
+    *compl_status = 2;
+  }
+}
+
 void write_from_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
                     void* buf, uint64_t lba, uint32_t cnt, bool chk_completion)
 {
@@ -288,7 +309,7 @@ void read_to_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
 
 // TODO: offset support
 void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                        void* buf, uint32_t key, uint32_t, cnt, bool chk_completion)
+                        void* buf, uint32_t key, uint32_t, int cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
@@ -299,7 +320,9 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
   obj_cmd.key = key;
   obj_cmd.sect_cnt = cnt - 1;
 
-  rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, &obj_cmd,
+  struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&obj_cmd);
+
+  rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
                                                    obj_write_complete, &cpl);
   if (rc != 0) {
     fprintf(stderr, "spdk io raw write failed\n");
@@ -312,7 +335,7 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
 }
 
 void obj_read_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                       void* buf, uint32_t key, uint32_t, cnt, bool chk_completion)
+                       void* buf, uint32_t key, uint32_t, int cnt, bool chk_completion)
 {
   int rc;
   int cpl = 0;
@@ -323,7 +346,9 @@ void obj_read_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qp
   obj_cmd.key = key;
   obj_cmd.sect_cnt = cnt - 1;
 
-  rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, &obj_cmd,
+  struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&obj_cmd);
+
+  rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
                                                    obj_read_complete, &cpl);
   if (rc != 0) {
     fprintf(stderr, "spdk io raw readfailed\n");
@@ -689,7 +714,7 @@ class RawSequentialFile final : public SequentialFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
-                ROUND_UP(size_, SECTSIZE) / SECTSIZE, true);
+                ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -737,7 +762,7 @@ class RawRandomAccessFile final : public RandomAccessFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
-                ROUND_UP(size_, SECTSIZE) / SECTSIZE, true);
+                ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -781,7 +806,7 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, SECT_PER_BLK * idx,
-                ROUND_UP(size_, SECTSIZE) / SECTSIZE, true);
+                ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -816,8 +841,8 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     uint64_t offset = idx_ * META_SIZE;
-    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECTSIZE);
-    uint64_t lba = ROUND_DOWN(offset, SECTSIZE) / SECTSIZE;
+    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECT_SIZE);
+    uint64_t lba = ROUND_DOWN(offset, SECT_SIZE) / SECT_SIZE;
     write_from_buf(ns, qpair, meta_buf, lba, 1, true);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -841,10 +866,10 @@ class RawWritableFile final : public WritableFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    char* target_buf = buf_ + ROUND_DOWN(synced_, SECTSIZE);
+    char* target_buf = buf_ + ROUND_DOWN(synced_, SECT_SIZE);
     uint64_t lba = SECT_PER_BLK * idx_ +
-                   ROUND_DOWN(synced_, SECTSIZE) / SECTSIZE;
-    uint32_t cnt = ROUND_UP(size_ - synced_, SECTSIZE) / SECTSIZE;
+                   ROUND_DOWN(synced_, SECT_SIZE) / SECT_SIZE;
+    uint32_t cnt = ROUND_UP(size_ - synced_, SECT_SIZE) / SECT_SIZE;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, true);
     if (!compaction_thd) {
@@ -929,24 +954,36 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    // TODO: check sstable file
-
-    g_fs_mtx.Lock();
-    if (!g_file_table.count(basename)) {
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+      if (!g_file_table.count(basename)) {
+        g_fs_mtx.Unlock();
+        return PosixError(filename, ENOENT);
+      }
+      int idx = g_file_table[basename];
       g_fs_mtx.Unlock();
-      return PosixError(filename, ENOENT);
-    }
-    int idx = g_file_table[basename];
-    g_fs_mtx.Unlock();
 
-    char* fbuf = static_cast<char*>(
-                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "NewSequentialFile malloc failed\n");
-      exit(1);
+      char* fbuf = static_cast<char*>(
+          spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+            SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+      if (fbuf == NULL) {
+        fprintf(stderr, "NewSequentialFile malloc failed\n");
+        exit(1);
+      }
+      *result = new RawSequentialFile(basename, fbuf, idx);
+    } else {
+      int fd = ::open(filename.c_str(), O_RDONLY);
+      if (fd < 0) {
+        *result = nullptr;
+        return PosixError(filename, errno);
+      }
+      *result = new PosixSequentialFile(filename, fd);
+      return Status::OK();
     }
-    *result = new RawSequentialFile(basename, fbuf, idx);
+
     return Status::OK();
   }
 
@@ -956,24 +993,52 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    // TODO: check sstable file
-
-    g_fs_mtx.Lock();
-    if (!g_file_table.count(basename)) {
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+      if (!g_file_table.count(basename)) {
+        g_fs_mtx.Unlock();
+        return PosixError(filename, ENOENT);
+      }
+      int idx = g_file_table[basename];
       g_fs_mtx.Unlock();
-      return PosixError(filename, ENOENT);
-    }
-    int idx = g_file_table[basename];
-    g_fs_mtx.Unlock();
 
-    char* fbuf = static_cast<char*>(
-                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "NewRandomAccessFile malloc failed\n");
-      exit(1);
+      char* fbuf = static_cast<char*>(
+                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+      if (fbuf == NULL) {
+        fprintf(stderr, "NewRandomAccessFile malloc failed\n");
+        exit(1);
+      }
+      *result = new RawRandomAccessFile(basename, fbuf, idx);
+    } else {
+      // TODO: use posix mmap file
+      *result = nullptr;
+      int fd = ::open(filename.c_str(), O_RDONLY);
+      if (fd < 0) {
+        return PosixError(filename, errno);
+      }
+
+      uint64_t file_size;
+      Status status = GetFileSize(filename, &file_size);
+      if (status.ok()) {
+        void* mmap_base =
+            ::mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (mmap_base != MAP_FAILED) {
+          *result = new PosixMmapReadableFile(filename,
+                                              reinterpret_cast<char*>(mmap_base),
+                                              file_size);
+        } else {
+          status = PosixError(filename, errno);
+        }
+      }
+      ::close(fd);
+
+      return status;
     }
-    *result = new RawRandomAccessFile(basename, fbuf, idx);
+
     return Status::OK();
   }
 
@@ -983,33 +1048,46 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    // TODO: check sstable file
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+      int idx;
+      if (!g_file_table.count(basename)) {
+        idx = g_free_idx.front();
+        g_free_idx.pop();
+        g_file_table.insert({basename, idx});
 
-    g_fs_mtx.Lock();
-    int idx;
-    if (!g_file_table.count(basename)) {
-      idx = g_free_idx.front();
-      g_free_idx.pop();
-      g_file_table.insert({basename, idx});
+        FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+        strcpy(meta->f_name, basename.c_str());
+        meta->f_name_len = basename.size();
+        meta->f_size = 0;
+        meta->f_next_blk = 0;
+      } else {
+        idx = g_file_table[basename];
+      }
+      g_fs_mtx.Unlock();
 
-      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-      strcpy(meta->f_name, basename.c_str());
-      meta->f_name_len = basename.size();
-      meta->f_size = 0;
-      meta->f_next_blk = 0;
+      char* fbuf = static_cast<char*>(
+                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+      if (fbuf == NULL) {
+        fprintf(stderr, "NewWritableFile malloc failed\n");
+        exit(1);
+      }
+      *result = new RawWritableFile(basename, fbuf, idx, true);
     } else {
-      idx = g_file_table[basename];
-    }
-    g_fs_mtx.Unlock();
+      int fd = ::open(filename.c_str(), O_TRUNC | O_WRONLY | O_CREAT, 0644);
+      if (fd < 0) {
+        *result = nullptr;
+        return PosixError(filename, errno);
+      }
 
-    char* fbuf = static_cast<char*>(
-                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "NewWritableFile malloc failed\n");
-      exit(1);
+      *result = new PosixWritableFile(filename, fd);
+      return Status::OK();
     }
-    *result = new RawWritableFile(basename, fbuf, idx, true);
+
     return Status::OK();
   }
 
@@ -1019,41 +1097,64 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    // TODO: check sstable file
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+      int idx;
+      if (!g_file_table.count(basename)) {
+        idx = g_free_idx.front();
+        g_free_idx.pop();
+        g_file_table.insert({basename, idx});
 
-    g_fs_mtx.Lock();
-    int idx;
-    if (!g_file_table.count(basename)) {
-      idx = g_free_idx.front();
-      g_free_idx.pop();
-      g_file_table.insert({basename, idx});
+        FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+        strcpy(meta->f_name, basename.c_str());
+        meta->f_name_len = basename.size();
+        meta->f_size = 0;
+        meta->f_next_blk = 0;
+      } else {
+        idx = g_file_table[basename];
+      }
+      g_fs_mtx.Unlock();
 
-      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-      strcpy(meta->f_name, basename.c_str());
-      meta->f_name_len = basename.size();
-      meta->f_size = 0;
-      meta->f_next_blk = 0;
+      char* fbuf = static_cast<char*>(
+                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+      if (fbuf == NULL) {
+        fprintf(stderr, "NewAppendableFile malloc failed\n");
+        exit(1);
+      }
+      *result = new RawWritableFile(basename, fbuf, idx, false);
     } else {
-      idx = g_file_table[basename];
-    }
-    g_fs_mtx.Unlock();
+      int fd = ::open(filename.c_str(), O_APPEND | O_WRONLY | O_CREAT, 0644);
+      if (fd < 0) {
+        *result = nullptr;
+        return PosixError(filename, errno);
+      }
 
-    char* fbuf = static_cast<char*>(
-                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-    if (fbuf == NULL) {
-      fprintf(stderr, "NewAppendableFile malloc failed\n");
-      exit(1);
+      *result = new PosixWritableFile(filename, fd);
+      return Status::OK();
     }
-    *result = new RawWritableFile(basename, fbuf, idx, false);
+
     return Status::OK();
   }
 
   bool FileExists(const std::string& filename) override {
     std::string basename = Basename(filename).ToString();
-    g_fs_mtx.Lock();
-    bool ret = g_file_table.count(basename);
-    g_fs_mtx.Unlock();
+
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+
+    bool ret;
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+      ret = g_file_table.count(basename);
+      g_fs_mtx.Unlock();
+    } else {
+      return ::access(filename.c_str(), F_OK) == 0;
+    }
 
     return ret;
   }
@@ -1067,6 +1168,16 @@ class PosixEnv : public Env {
       result->emplace_back(it.first);
     g_fs_mtx.Unlock();
 
+    ::DIR* dir = ::opendir(directory_path.c_str());
+    if (dir == nullptr) {
+      return PosixError(directory_path, errno);
+    }
+    struct ::dirent* entry;
+    while ((entry = ::readdir(dir)) != nullptr) {
+      result->emplace_back(entry->d_name);
+    }
+    ::closedir(dir);
+
     return Status::OK();
   }
 
@@ -1075,51 +1186,67 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    g_fs_mtx.Lock();
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
 
-    if (!g_file_table.count(basename)) {
+      if (!g_file_table.count(basename)) {
+        g_fs_mtx.Unlock();
+        return PosixError(filename, ENOENT);
+      }
+
+      int idx = g_file_table[basename];
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+      meta->f_size = 0;
+      meta->f_name_len = 0;
+      meta->f_next_blk = 0;
+      meta->f_name[0] = '\0';
+
+      struct ns_entry* ns_ent = g_namespaces;
+      struct spdk_nvme_ns* ns = ns_ent->ns;
+      struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+      if (!compaction_thd) {
+        ns_ent->qpair_mtx.Lock();
+        qpair = ns_ent->qpair;
+      }
+
+      assert(META_SIZE <= SECT_SIZE);
+      uint64_t offset = idx * META_SIZE; // in bytes
+      void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECT_SIZE);
+      write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECT_SIZE) / SECT_SIZE, 1, true);
+
+      if (!compaction_thd) {
+        ns_ent->qpair_mtx.Unlock();
+      }
+
+      g_free_idx.push(idx);
+      g_file_table.erase(basename);
+
       g_fs_mtx.Unlock();
-      return PosixError(filename, ENOENT);
+    } else {
+      if (::unlink(filename.c_str()) != 0) {
+        return PosixError(filename, errno);
+      }
+      return Status::OK();
     }
-
-    int idx = g_file_table[basename];
-    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-
-    meta->f_size = 0;
-    meta->f_name_len = 0;
-    meta->f_next_blk = 0;
-    meta->f_name[0] = '\0';
-
-    struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
-
-    assert(META_SIZE <= SECTSIZE);
-    uint64_t offset = idx * META_SIZE; // in bytes
-    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECTSIZE);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECTSIZE) / SECTSIZE, 1, true);
-
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
-
-    g_free_idx.push(idx);
-    g_file_table.erase(basename);
-
-    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
 
   Status CreateDir(const std::string& dirname) override {
+    if (::mkdir(dirname.c_str(), 0755) != 0) {
+      return PosixError(dirname, errno);
+    }
     return Status::OK();
   }
 
   Status DeleteDir(const std::string& dirname) override {
+    if (::rmdir(dirname.c_str()) != 0) {
+      return PosixError(dirname, errno);
+    }
     return Status::OK();
   }
 
@@ -1128,19 +1255,32 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    g_fs_mtx.Lock();
-    if (!g_file_table.count(basename)) {
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      g_fs_mtx.Lock();
+      if (!g_file_table.count(basename)) {
+        g_fs_mtx.Unlock();
+        return PosixError(filename, ENOENT);
+      }
+
+      int idx = g_file_table[basename];
+
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+      *size = meta->f_size;
+
       g_fs_mtx.Unlock();
-      return PosixError(filename, ENOENT);
+    } else {
+      struct ::stat file_stat;
+      if (::stat(filename.c_str(), &file_stat) != 0) {
+        *size = 0;
+        return PosixError(filename, errno);
+      }
+      *size = file_stat.st_size;
+      return Status::OK();
     }
-
-    int idx = g_file_table[basename];
-
-    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-
-    *size = meta->f_size;
-
-    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -1153,43 +1293,53 @@ class PosixEnv : public Env {
     std::string basename_from = Basename(from).ToString();
     std::string basename_to = Basename(to).ToString();
 
-    if (!g_file_table.count(basename_from)) {
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename_from, &fnum, &ftype);
+    if (ftype == kTableFile) {
+      if (!g_file_table.count(basename_from)) {
+        g_fs_mtx.Unlock();
+        return PosixError(from, ENOENT);
+      }
+
       g_fs_mtx.Unlock();
-      return PosixError(from, ENOENT);
+      DeleteFile(to); // ignore error
+      g_fs_mtx.Lock();
+
+
+      int idx = g_file_table[basename_from];
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+      meta->f_name_len = basename_to.size();
+      strcpy(meta->f_name, basename_to.c_str());
+
+      struct ns_entry* ns_ent = g_namespaces;
+      struct spdk_nvme_ns* ns = ns_ent->ns;
+      struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+      if (!compaction_thd) {
+        ns_ent->qpair_mtx.Lock();
+        qpair = ns_ent->qpair;
+      }
+
+      assert(META_SIZE <= SECT_SIZE);
+      uint64_t offset = idx * META_SIZE; // in bytes
+      void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECT_SIZE);
+      write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECT_SIZE) / SECT_SIZE, 1, true);
+
+      if (!compaction_thd) {
+        ns_ent->qpair_mtx.Unlock();
+      }
+
+      g_file_table[basename_to] = g_file_table[basename_from];
+      g_file_table.erase(basename_from);
+
+      g_fs_mtx.Unlock();
+    } else {
+      if (std::rename(from.c_str(), to.c_str()) != 0) {
+        return PosixError(from, errno);
+      }
+      return Status::OK();
     }
-
-    g_fs_mtx.Unlock();
-    DeleteFile(to); // ignore error
-    g_fs_mtx.Lock();
-
-
-    int idx = g_file_table[basename_from];
-    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-
-    meta->f_name_len = basename_to.size();
-    strcpy(meta->f_name, basename_to.c_str());
-
-    struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
-
-    assert(META_SIZE <= SECTSIZE);
-    uint64_t offset = idx * META_SIZE; // in bytes
-    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECTSIZE);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECTSIZE) / SECTSIZE, 1, true);
-
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
-
-    g_file_table[basename_to] = g_file_table[basename_from];
-    g_file_table.erase(basename_from);
-
-    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
