@@ -51,21 +51,20 @@ extern "C" {
 
 namespace leveldb {
 
+#define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
+#define ROUND_DOWN(N, S) ((N) / (S) * (S))
+
 #define LDBFS_MAGIC (0xe51ab1541542020full)
-#define BLK_SIZE (4ULL * 1024 * 1024)     // 4 MiB per block
+#define BLK_SIZE (4ULL * 1024 * 1024)      // 4 MiB per block
 #define META_SIZE (128)
-//#define BLK_CNT (BLK_SIZE / META_SIZE)    // maximum blocks in LDBFS
-#define BLK_CNT (512)
-#define FS_SIZE (BLK_SIZE * BLK_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
+#define BLK_CNT (512)                      // maximum blocks in object storage
+#define FS_SIZE (BLK_SIZE * BLK_CNT)
 
 #define SECT_SIZE (4ULL * 1024)
 #define SECT_PER_BLK (BLK_SIZE / SECT_SIZE)
 
 #define BUF_ALIGN (0x1000)
-
-#define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
-#define ROUND_DOWN(N, S) ((N) / (S) * (S))
 
 #define SPDK_NVME_OPC_COSMOS_WRITE 0x81
 #define SPDK_NVME_OPC_COSMOS_READ  0x82
@@ -152,6 +151,8 @@ SuperBlock* g_sb_ptr;                     // guarded by g_fs_mtx
 std::map<std::string, int> g_file_table;  // guarded by g_fs_mtx
 std::queue<int> g_free_idx;               // guarded by g_fs_mtx
 port::Mutex g_fs_mtx;
+
+std::string g_dbname;
 
 thread_local bool compaction_thd = false;
 
@@ -833,22 +834,10 @@ class RawWritableFile final : public WritableFile {
   }
 
   Status Close() override {
-    g_sb_ptr->sb_meta[idx_].f_size = size_;
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx_];
+    meta->f_size = size_;
+    msync(meta, META_SIZE, MS_SYNC);
 
-    struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
-    uint64_t offset = idx_ * META_SIZE;
-    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECT_SIZE);
-    uint64_t lba = ROUND_DOWN(offset, SECT_SIZE) / SECT_SIZE;
-    write_from_buf(ns, qpair, meta_buf, lba, 1, true);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
     closed_ = true;
     return Status::OK();
   }
@@ -1200,22 +1189,7 @@ class PosixEnv : public Env {
       meta->f_next_blk = 0;
       meta->f_name[0] = '\0';
 
-      struct ns_entry* ns_ent = g_namespaces;
-      struct spdk_nvme_ns* ns = ns_ent->ns;
-      struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-      if (!compaction_thd) {
-        ns_ent->qpair_mtx.Lock();
-        qpair = ns_ent->qpair;
-      }
-
-      assert(META_SIZE <= SECT_SIZE);
-      uint64_t offset = idx * META_SIZE; // in bytes
-      void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECT_SIZE);
-      write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECT_SIZE) / SECT_SIZE, 1, true);
-
-      if (!compaction_thd) {
-        ns_ent->qpair_mtx.Unlock();
-      }
+      msync(meta, META_SIZE, MS_SYNC);
 
       g_free_idx.push(idx);
       g_file_table.erase(basename);
@@ -1231,10 +1205,53 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  // initialize internal filesystem here
   Status CreateDir(const std::string& dirname) override {
     if (::mkdir(dirname.c_str(), 0755) != 0) {
       return PosixError(dirname, errno);
     }
+
+    if (g_dbname == "") {
+      g_dbname = dirname;
+      int sb_fd = open((g_dbname + "/sb").c_str(), O_RDWR | O_CREAT, 0644);
+      if (sb_fd == -1) {
+        perror("open sb");
+        exit(1);
+      }
+      if (ftruncate(sb_fd, sizeof(SuperBlock)) == -1) {
+        perror("ftrunacte");
+        exit(1);
+      }
+      g_sbbuf = mmap(nullptr, sizeof(SuperBlock), PROT_READ | PROT_WRITE, MAP_SHARED, sb_fd, 0);
+      if (g_sbbuf == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
+      }
+      close(sb_fd);
+
+      g_fs_mtx.Lock();
+      g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
+      FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
+      if (sb_meta->sb_magic == LDBFS_MAGIC) {
+        fprintf(stderr, "ldbfs found\n");
+        for (int i = 1; i < BLK_CNT; i++) {
+          FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
+          if (meta_ent->f_name_len == 0) {
+            g_free_idx.push(i);
+          } else {
+            g_file_table.insert({meta_ent->f_name, i});
+          }
+        }
+      } else {
+        memset(g_sbbuf, 0, BLK_SIZE);
+        sb_meta->sb_magic = LDBFS_MAGIC;
+
+        for (int i = 1; i < BLK_CNT; i++) {
+          g_free_idx.push(i);
+        }
+      }
+    }
+    g_fs_mtx.Unlock();
     return Status::OK();
   }
 
@@ -1301,29 +1318,13 @@ class PosixEnv : public Env {
       DeleteFile(to); // ignore error
       g_fs_mtx.Lock();
 
-
       int idx = g_file_table[basename_from];
       FileMeta* meta = &g_sb_ptr->sb_meta[idx];
 
       meta->f_name_len = basename_to.size();
       strcpy(meta->f_name, basename_to.c_str());
 
-      struct ns_entry* ns_ent = g_namespaces;
-      struct spdk_nvme_ns* ns = ns_ent->ns;
-      struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-      if (!compaction_thd) {
-        ns_ent->qpair_mtx.Lock();
-        qpair = ns_ent->qpair;
-      }
-
-      assert(META_SIZE <= SECT_SIZE);
-      uint64_t offset = idx * META_SIZE; // in bytes
-      void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, SECT_SIZE);
-      write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, SECT_SIZE) / SECT_SIZE, 1, true);
-
-      if (!compaction_thd) {
-        ns_ent->qpair_mtx.Unlock();
-      }
+      msync(meta, META_SIZE, MS_SYNC);
 
       g_file_table[basename_to] = g_file_table[basename_from];
       g_file_table.erase(basename_from);
@@ -1419,51 +1420,8 @@ PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false) {
   g_ns_mtx.Lock();
-
   init_spdk();
-
-  g_sbbuf = spdk_zmalloc(BLK_SIZE, BUF_ALIGN, nullptr,
-                         SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-  if (g_sbbuf == nullptr) {
-    fprintf(stderr, "spdk_zmalloc failed\n");
-    exit(1);
-  }
   g_ns_mtx.Unlock();
-
-  g_fs_mtx.Lock();
-
-  struct ns_entry *ns_ent = g_namespaces;
-  ns_ent->qpair_mtx.Lock();
-
-  obj_read_to_buf(ns_ent->ctrlr, ns_ent->qpair, g_sbbuf, 0, SECT_PER_BLK, true);
-
-  g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
-  FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
-
-  if (sb_meta->sb_magic == LDBFS_MAGIC) {
-    fprintf(stderr, "ldbfs found\n");
-    for (int i = 1; i < BLK_CNT; i++) {
-      FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
-      if (meta_ent->f_name_len == 0) {
-        g_free_idx.push(i);
-      } else {
-        g_file_table.insert({meta_ent->f_name, i});
-      }
-    }
-  } else {
-    memset(g_sbbuf, 0, BLK_SIZE);
-    sb_meta->sb_magic = LDBFS_MAGIC;
-
-    write_from_buf(ns_ent->ns, ns_ent->qpair, g_sbbuf, 0, SECT_PER_BLK, true);
-    fprintf(stderr, "spdk sb write done\n");
-
-    for (int i = 1; i < BLK_CNT; i++) {
-      g_free_idx.push(i);
-    }
-  }
-
-  ns_ent->qpair_mtx.Unlock();
-  g_fs_mtx.Unlock();
 }
 
 void PosixEnv::Schedule(
