@@ -1208,7 +1208,11 @@ class PosixEnv : public Env {
   // initialize internal filesystem here
   Status CreateDir(const std::string& dirname) override {
     if (::mkdir(dirname.c_str(), 0755) != 0) {
-      return PosixError(dirname, errno);
+      if (errno != EEXIST) {
+        perror("create dir\n");
+        exit(1);
+      }
+      //return PosixError(dirname, errno);
     }
 
     if (g_dbname == "") {
@@ -1243,7 +1247,7 @@ class PosixEnv : public Env {
           }
         }
       } else {
-        memset(g_sbbuf, 0, BLK_SIZE);
+        memset(g_sbbuf, 0, sizeof(SuperBlock));
         sb_meta->sb_magic = LDBFS_MAGIC;
 
         for (int i = 1; i < BLK_CNT; i++) {
@@ -1251,7 +1255,9 @@ class PosixEnv : public Env {
         }
       }
     }
+
     g_fs_mtx.Unlock();
+
     return Status::OK();
   }
 
