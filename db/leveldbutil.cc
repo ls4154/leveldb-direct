@@ -51,7 +51,7 @@ bool ParseFileList(char* s, std::vector<std::string>& v) {
 }
 
 bool HandleCompactCommand(Env* env, char** argv, int argc) {
-  if (argc < 5) {
+  if (argc < 6) {
     fprintf(stderr, "compact: missing arguments\n");
     return false;
   }

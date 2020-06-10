@@ -291,6 +291,10 @@ bool DoCompaction(CompactionInfo* ci) {
 
     if (!drop) {
       if (builder == nullptr) {
+        if (out_cnt == ci->outputs.size()) {
+          fprintf(stderr, "Out of output files\n");
+          exit(1);
+        }
         cur_output = &ci->outputs[out_cnt++];
         uint64_t fnum = cur_output->number;
         std::string fname = TableFileName(ci->dbname, fnum);
