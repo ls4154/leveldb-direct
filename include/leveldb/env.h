@@ -187,6 +187,8 @@ class LEVELDB_EXPORT Env {
 
   // Sleep/delay the thread for the prescribed number of micro-seconds.
   virtual void SleepForMicroseconds(int micros) = 0;
+
+  virtual Status OffloadCompaction(void* input_buf, void* output_buf) = 0;
 };
 
 // A file abstraction for reading sequentially through a file
@@ -367,6 +369,9 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
   uint64_t NowMicros() override { return target_->NowMicros(); }
   void SleepForMicroseconds(int micros) override {
     target_->SleepForMicroseconds(micros);
+  }
+  Status OffloadCompaction(void* input_buf, void* output_buf) override {
+    return target_->OffloadCompaction(input_buf, output_buf);
   }
 
  private:

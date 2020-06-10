@@ -1383,6 +1383,11 @@ class PosixEnv : public Env {
 
   void SleepForMicroseconds(int micros) override { ::usleep(micros); }
 
+  Status OffloadCompaction(void* input_buf, void* output_buf) override {
+    return Status::OK();
+  }
+
+
  private:
   void BackgroundThreadMain();
 
