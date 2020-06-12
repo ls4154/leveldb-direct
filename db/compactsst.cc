@@ -134,7 +134,7 @@ CompactionInfo* MakeCompctionInfo(Env* env, std::string&dbname, int level,
                                             std::vector<std::string>& in_files,
                                             std::vector<std::string>& in_files2,
                                             std::vector<std::string>& out_files,
-                                            uint64_t seqnum) {
+                                            uint64_t seqnum, uint64_t max_file_size) {
   CompactionInfo* ci = new CompactionInfo;
 
   ReadOptions ropts;
@@ -145,7 +145,7 @@ CompactionInfo* MakeCompctionInfo(Env* env, std::string&dbname, int level,
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->table_cache = new TableCache(ci->dbname, *ci->opts, 100);
   ci->smallest_snapshot = seqnum;
-  ci->max_output_file_size = 2 * 1024 * 1024;
+  ci->max_output_file_size = max_file_size;
 
   fprintf(stderr, "Level %d: ", level);
   for (std::string& s : in_files) {
@@ -342,8 +342,10 @@ bool DoCompaction(CompactionInfo* ci) {
         outfile = nullptr;
 
         // TODO verify table
-        fprintf(stderr, "Generated table %lu, %ld keys, %ld bytes\n",
-                        cur_output->number, num_entries, file_size);
+        fprintf(stderr, "Generated table %llu, %llu keys, %llu bytes\n",
+                        static_cast<unsigned long long>(cur_output->number),
+                        static_cast<unsigned long long>(num_entries),
+                        static_cast<unsigned long long>(file_size));
       }
     }
 
@@ -381,8 +383,10 @@ bool DoCompaction(CompactionInfo* ci) {
     outfile = nullptr;
 
     // TODO verify table
-    fprintf(stderr, "Generated table %lu, %ld keys, %ld bytes\n",
-                    cur_output->number, num_entries, file_size);
+    fprintf(stderr, "Generated table %llu, %llu keys, %llu bytes\n",
+        static_cast<unsigned long long>(cur_output->number),
+        static_cast<unsigned long long>(num_entries),
+        static_cast<unsigned long long>(file_size));
   }
 
   delete input;
@@ -397,8 +401,9 @@ Status CompactSST(Env* env, std::string&dbname, int level,
                             std::vector<std::string>& in_files,
                             std::vector<std::string>& in_files2,
                             std::vector<std::string>& out_files,
-                            uint64_t seqnum) {
-  CompactionInfo* ci = MakeCompctionInfo(env, dbname, level, in_files, in_files2, out_files, seqnum);
+                            uint64_t seqnum, uint64_t max_file_size) {
+  CompactionInfo* ci = MakeCompctionInfo(env, dbname, level, in_files, in_files2,
+                                               out_files, seqnum, max_file_size);
 
   struct timeval tv1, tv2;
   gettimeofday(&tv1, NULL);
@@ -412,12 +417,13 @@ Status CompactSST(Env* env, std::string&dbname, int level,
     if (tm.file_size == 0) {
       continue;
     }
-    fprintf(stderr, "File %lu %s .. %s\n", tm.number,
-                                      tm.smallest.user_key().ToString().c_str(),
-                                      tm.largest.user_key().ToString().c_str());
+    fprintf(stderr, "File %llu %s .. %s\n", static_cast<unsigned long long>(tm.number),
+                                            tm.smallest.user_key().ToString().c_str(),
+                                            tm.largest.user_key().ToString().c_str());
   }
 
-  fprintf(stderr, "Compaction time %lu us\n", (tv2.tv_sec - tv1.tv_sec) * 1000000 + tv2.tv_usec - tv1.tv_usec);
+  fprintf(stderr, "Compaction time %lld us\n",
+          static_cast<long long>((tv2.tv_sec - tv1.tv_sec) * 1000000 + tv2.tv_usec - tv1.tv_usec));
 
   return Status::OK();
 }

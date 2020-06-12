@@ -15,7 +15,7 @@ LEVELDB_EXPORT Status CompactSST(Env* env, std::string& dbname, int level,
                                            std::vector<std::string>& in_files,
                                            std::vector<std::string>& in_files2,
                                            std::vector<std::string>& out_files,
-                                           uint64_t seqnum);
+                                           uint64_t seqnum, uint64_t max_file_size);
 
 }
 

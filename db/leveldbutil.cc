@@ -51,7 +51,7 @@ bool ParseFileList(char* s, std::vector<std::string>& v) {
 }
 
 bool HandleCompactCommand(Env* env, char** argv, int argc) {
-  if (argc < 6) {
+  if (argc < 7) {
     fprintf(stderr, "compact: missing arguments\n");
     return false;
   }
@@ -62,6 +62,7 @@ bool HandleCompactCommand(Env* env, char** argv, int argc) {
   std::vector<std::string> in_files2;
   std::vector<std::string> out_files;
   uint64_t seqnum;
+  uint64_t max_file_size;
 
   dbname = argv[0];
   level = atoi(argv[1]);
@@ -69,8 +70,9 @@ bool HandleCompactCommand(Env* env, char** argv, int argc) {
   ParseFileList(argv[3], in_files2);
   ParseFileList(argv[4], out_files);
   seqnum = strtoull(argv[5], nullptr, 10);
+  max_file_size = strtoull(argv[6], nullptr, 10);
 
-  Status s = CompactSST(env, dbname, level, in_files, in_files2, out_files, seqnum);
+  Status s = CompactSST(env, dbname, level, in_files, in_files2, out_files, seqnum, max_file_size);
   if (!s.ok()) {
     fprintf(stderr, "%s\n", s.ToString().c_str());
     return false;
@@ -84,8 +86,8 @@ bool HandleCompactCommand(Env* env, char** argv, int argc) {
 static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
-          "   dump files...               -- dump contents of specified files\n"
-          "   compact dbname level infiles infiles2 outfiles sequence  -- compact sstables\n");
+          "   dump files...                                    -- dump contents of specified files\n"
+          "   compact dbname level infiles infiles2 outfiles sequence filesize -- compact sstables\n");
 }
 
 int main(int argc, char** argv) {
