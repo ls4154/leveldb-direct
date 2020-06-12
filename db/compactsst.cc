@@ -39,6 +39,7 @@ struct CompactionInfo {
   int level;
   std::vector<TableMeta> inputs[2];
   std::vector<TableMeta> outputs;
+  uint32_t out_cnt;
   SequenceNumber smallest_snapshot;
   uint64_t max_output_file_size;
   InternalKeyComparator* icmp;
@@ -389,8 +390,52 @@ bool DoCompaction(CompactionInfo* ci) {
         static_cast<unsigned long long>(file_size));
   }
 
+  ci->out_cnt = out_cnt;
+
   delete input;
   input = nullptr;
+
+  return true;
+}
+
+bool MakeResultInfo(CompactionInfo* ci, std::string output_name) {
+  Env* env = ci->env;
+  WritableFile* outfile = nullptr;
+  Status status = env->NewWritableFile(ci->dbname + "/" + output_name, &outfile);
+  if (!status.ok()) {
+    fprintf(stderr, "NewWritableFile error %s\n", output_name.c_str());
+    exit(1);
+  }
+
+  outfile->Append(Slice(reinterpret_cast<char*>(&ci->out_cnt), sizeof(uint32_t)));
+  for (TableMeta& tm : ci->outputs) {
+    if (tm.file_size == 0) {
+      continue;
+    }
+    uint32_t fnum = tm.number;
+    uint32_t fsize = tm.file_size;
+    outfile->Append(Slice(reinterpret_cast<char*>(&fnum), sizeof(uint32_t)));
+    outfile->Append(Slice(reinterpret_cast<char*>(&fsize), sizeof(uint32_t)));
+
+    uint32_t klen = tm.smallest.user_key().size();
+    outfile->Append(Slice(reinterpret_cast<char*>(&klen), sizeof(uint32_t)));
+    outfile->Append(tm.smallest.Encode());
+
+    klen = tm.largest.user_key().size();
+    outfile->Append(Slice(reinterpret_cast<char*>(&klen), sizeof(uint32_t)));
+    outfile->Append(tm.largest.Encode());
+  }
+  outfile->Sync();
+  if (!status.ok()) {
+    fprintf(stderr, "sync error\n");
+    exit(1);
+  }
+  outfile->Close();
+  if (!status.ok()) {
+    fprintf(stderr, "close error\n");
+    exit(1);
+  }
+  delete outfile;
 
   return true;
 }
@@ -410,7 +455,12 @@ Status CompactSST(Env* env, std::string&dbname, int level,
   bool ok = DoCompaction(ci);
   gettimeofday(&tv2, NULL);
   if (!ok) {
-    return Status::InvalidArgument("CompacSST error");
+    return Status::InvalidArgument("Compaction error");
+  }
+
+  ok = MakeResultInfo(ci, "compact.out");
+  if (!ok) {
+    return Status::InvalidArgument("Make result error");
   }
 
   for (TableMeta& tm : ci->outputs) {
