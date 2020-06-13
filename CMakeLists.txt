@@ -16,13 +16,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (WIN32)
-  set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_WINDOWS)
-  # TODO(cmumford): Make UNICODE configurable for Windows.
-  add_definitions(-D_UNICODE -DUNICODE)
-else (WIN32)
-  set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_POSIX)
-endif (WIN32)
+set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_POSIX)
 
 option(LEVELDB_BUILD_TESTS "Build LevelDB's unit tests" ON)
 option(LEVELDB_BUILD_BENCHMARKS "Build LevelDB's benchmarks" ON)
@@ -187,19 +181,11 @@ target_sources(leveldb
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
 )
 
-if (WIN32)
-  target_sources(leveldb
-    PRIVATE
-      "${PROJECT_SOURCE_DIR}/util/env_windows.cc"
-      "${PROJECT_SOURCE_DIR}/util/windows_logger.h"
-  )
-else (WIN32)
-  target_sources(leveldb
-    PRIVATE
-      "${PROJECT_SOURCE_DIR}/util/env_posix.cc"
-      "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
-  )
-endif (WIN32)
+target_sources(leveldb
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/util/env_posix.cc"
+    "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
+)
 
 # MemEnv is not part of the interface and could be pulled to a separate library.
 target_sources(leveldb
@@ -335,11 +321,7 @@ if(LEVELDB_BUILD_TESTS)
 
     # TODO(costan): This test also uses
     #               "${PROJECT_SOURCE_DIR}/util/env_{posix|windows}_test_helper.h"
-    if (WIN32)
-      leveldb_test("${PROJECT_SOURCE_DIR}/util/env_windows_test.cc")
-    else (WIN32)
-      leveldb_test("${PROJECT_SOURCE_DIR}/util/env_posix_test.cc")
-    endif (WIN32)
+    leveldb_test("${PROJECT_SOURCE_DIR}/util/env_posix_test.cc")
   endif(NOT BUILD_SHARED_LIBS)
 endif(LEVELDB_BUILD_TESTS)
 
