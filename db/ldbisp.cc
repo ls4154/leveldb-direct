@@ -1,7 +1,11 @@
 #include <bits/stdint-uintn.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <string>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 
 #include "leveldb/compactsst.h"
 
@@ -28,17 +32,24 @@ struct InputData {
   char data[];
 };
 
-bool StartCompactionDaemon() {
-  void* mmap_base; // TODO mmap
+bool StartCompactionDaemon(unsigned long shmem_addr) {
+  int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+  if (mem_fd == -1) {
+    perror("open mem\n");
+    exit(1);
+  }
+  void* mmap_base = mmap(nullptr, sizeof(CompactionShared), PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, shmem_addr);
   CompactionShared* cshared = reinterpret_cast<CompactionShared*>(mmap_base);
   int* state = &cshared->state;
   while (1) {
-    while (*state == 0);
-    *state = 1;
-
-    InputData* id = reinterpret_cast<InputData*>(cshared->host_buf);
+    while (*state != 2);
 
     fprintf(stderr, "start compaction\n");
+    fprintf(stderr, "host buffer phys addr %p\n", cshared->host_buf);
+
+    void* host_buf_base = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, (off_t)cshared->host_buf);
+    InputData* id = reinterpret_cast<InputData*>(host_buf_base);
+
     fprintf(stderr, "level %u, sequence %llu\n", id->level, (long long)id->sequence);
 
     if (id->input_cnt > MAX_FILE_CNT) {
@@ -77,7 +88,9 @@ bool StartCompactionDaemon() {
       fprintf(stderr, "    %p\n", &cshared->output_file[i]);
       input2_files.push_back({&cshared->output_file[i], 0});
     }
-    CompactSST(id->level, id->sequence, input_files, input2_files, output_files);
+    CompactSST(id->level, id->sequence, input_files, input2_files, output_files, cshared->host_buf);
+
+    *state = 3;
   }
   return true;
 }
@@ -86,6 +99,10 @@ bool StartCompactionDaemon() {
 }  // namespace leveldb
 
 int main(int argc, char** argv) {
-  bool ok = leveldb::StartCompactionDaemon();
+  unsigned long shmem_addr = 0x24500000;
+  if (argc >= 2) {
+    shmem_addr = strtoul(argv[1], nullptr, 0);
+  }
+  bool ok = leveldb::StartCompactionDaemon(shmem_addr);
   return (ok ? 0 : 1);
 }

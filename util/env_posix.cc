@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <bits/stdint-uintn.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -86,40 +87,37 @@ class PosixSequentialFile final : public SequentialFile {
   const std::string filename_;
 };
 
-class PosixMmapReadableFile final : public RandomAccessFile {
+class ISPRandomAccessFile final : public RandomAccessFile {
  public:
-  PosixMmapReadableFile(std::string filename, char* mmap_base, size_t length)
-      : mmap_base_(mmap_base),
-        length_(length),
-        filename_(std::move(filename)) {}
+  ISPRandomAccessFile(char* buf, uint32_t size)
+      : buf_(buf), size_(size) {}
 
-  ~PosixMmapReadableFile() override {
-    ::munmap(static_cast<void*>(mmap_base_), length_);
+  ~ISPRandomAccessFile() override {
+    munmap(static_cast<void*>(buf_), size_);
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
-    if (offset + n > length_) {
+    if (offset + n > size_) {
       *result = Slice();
-      return PosixError(filename_, EINVAL);
+      return PosixError("RandomAccessFile", EINVAL);
     }
 
-    *result = Slice(mmap_base_ + offset, n);
+    *result = Slice(buf_ + offset, n);
     return Status::OK();
   }
 
  private:
-  char* const mmap_base_;
-  const size_t length_;
-  const std::string filename_;
+  char* const buf_;
+  uint32_t size_;
 };
 
-class PosixWritableFile final : public WritableFile {
+class ISPWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(char* buf, uint32_t size)
+  ISPWritableFile(char* buf, uint32_t size)
       : buf_(buf), size_(size) {}
 
-  ~PosixWritableFile() override {
+  ~ISPWritableFile() override {
     munmap(buf_, MAX_OBJ_SIZE);
   }
 
@@ -208,25 +206,34 @@ class PosixEnv : public Env {
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
-    assert(0);
+    uint32_t buf_phys_addr = *reinterpret_cast<const uint32_t*>(filename.data());
+    uint32_t size = *reinterpret_cast<const uint32_t*>(filename.data() + 4);
+
+    char* buf = reinterpret_cast<char*>(mmap(nullptr, size, PROT_READ, MAP_SHARED, g_mem_fd, buf_phys_addr));
+
+    *result = new ISPRandomAccessFile(buf, size);
     return Status::OK();
   }
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    char* buf;
-    uint32_t size;
+    uint32_t buf_phys_addr = *reinterpret_cast<const uint32_t*>(filename.data());
+    uint32_t size = *reinterpret_cast<const uint32_t*>(filename.data() + 4);
 
-    *result = new PosixWritableFile(buf, size);
+    char* buf = reinterpret_cast<char*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, g_mem_fd, buf_phys_addr));
+
+    *result = new ISPWritableFile(buf, 0);
     return Status::OK();
   }
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    char* buf;
-    uint32_t size;
+    uint32_t buf_phys_addr = *reinterpret_cast<const uint32_t*>(filename.data());
+    uint32_t size = *reinterpret_cast<const uint32_t*>(filename.data() + 4);
 
-    *result = new PosixWritableFile(buf, size);
+    char* buf = reinterpret_cast<char*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, g_mem_fd, buf_phys_addr));
+
+    *result = new ISPWritableFile(buf, size);
     return Status::OK();
   }
 
