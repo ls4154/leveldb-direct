@@ -21,7 +21,7 @@ struct CompactionShared {
   char output_file[MAX_FILE_CNT * 2][MAX_OBJ_SIZE];
   int state;
   void* host_buf;
-};
+} __attribute__((packed));
 
 struct InputData {
   uint32_t level;
@@ -30,7 +30,7 @@ struct InputData {
   uint32_t input2_cnt;
   uint32_t output_cnt;
   char data[];
-};
+} __attribute__((packed));
 
 bool StartCompactionDaemon(unsigned long shmem_addr) {
   int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);

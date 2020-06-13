@@ -51,7 +51,7 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->result_buf = result_buf;
 
-  fprintf(stderr, "level %d", level);
+  fprintf(stderr, "level %d\n", level);
   for (FileMeta& fm : input_files) {
     std::string fname((char*)&fm.first, 4);
     fname.append((char*)&fm.second, 4);
@@ -62,7 +62,7 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
 
     ci->infile_sizes[0].push_back(fm.second);
   }
-  fprintf(stderr, "level %d", level+1);
+  fprintf(stderr, "level %d\n", level+1);
   for (FileMeta& fm : input2_files) {
     std::string fname((char*)&fm.first, 4);
     fname.append((char*)&fm.second, 4);
@@ -73,7 +73,7 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
 
     ci->infile_sizes[1].push_back(fm.second);
   }
-  fprintf(stderr, "output");
+  fprintf(stderr, "output\n");
   for (FileMeta& fm : output_files) {
     std::string fname((char*)&fm.first, 4);
     fname.append((char*)&fm.second, 4);
