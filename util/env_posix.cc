@@ -93,7 +93,6 @@ class ISPRandomAccessFile final : public RandomAccessFile {
       : buf_(buf), size_(size) {}
 
   ~ISPRandomAccessFile() override {
-    munmap(static_cast<void*>(buf_), size_);
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
@@ -118,7 +117,6 @@ class ISPWritableFile final : public WritableFile {
       : buf_(buf), size_(size) {}
 
   ~ISPWritableFile() override {
-    munmap(buf_, MAX_OBJ_SIZE);
   }
 
   Status Append(const Slice& data) override {
@@ -206,34 +204,28 @@ class PosixEnv : public Env {
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
-    uint32_t buf_phys_addr = *reinterpret_cast<const uint32_t*>(filename.data());
+    uint32_t buf_addr = *reinterpret_cast<const uint32_t*>(filename.data());
     uint32_t size = *reinterpret_cast<const uint32_t*>(filename.data() + 4);
 
-    char* buf = reinterpret_cast<char*>(mmap(nullptr, size, PROT_READ, MAP_SHARED, g_mem_fd, buf_phys_addr));
-
-    *result = new ISPRandomAccessFile(buf, size);
+    *result = new ISPRandomAccessFile((char *)buf_addr, size);
     return Status::OK();
   }
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    uint32_t buf_phys_addr = *reinterpret_cast<const uint32_t*>(filename.data());
+    uint32_t buf_addr = *reinterpret_cast<const uint32_t*>(filename.data());
     uint32_t size = *reinterpret_cast<const uint32_t*>(filename.data() + 4);
 
-    char* buf = reinterpret_cast<char*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, g_mem_fd, buf_phys_addr));
-
-    *result = new ISPWritableFile(buf, 0);
+    *result = new ISPWritableFile((char*)buf_addr, 0);
     return Status::OK();
   }
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    uint32_t buf_phys_addr = *reinterpret_cast<const uint32_t*>(filename.data());
+    uint32_t buf_addr = *reinterpret_cast<const uint32_t*>(filename.data());
     uint32_t size = *reinterpret_cast<const uint32_t*>(filename.data() + 4);
 
-    char* buf = reinterpret_cast<char*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, g_mem_fd, buf_phys_addr));
-
-    *result = new ISPWritableFile(buf, size);
+    *result = new ISPWritableFile((char*)buf_addr, size);
     return Status::OK();
   }
 

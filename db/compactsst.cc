@@ -48,6 +48,9 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
   ci->out_cnt = 0;
   ci->smallest_snapshot = sequence;
   ci->max_output_file_size = 4 * 1000 * 1000;
+  ci->outfile_sizes.resize(output_files.size());
+  ci->outfile_smallest.resize(output_files.size());
+  ci->outfile_largest.resize(output_files.size());
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->result_buf = result_buf;
 
@@ -89,19 +92,24 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
 Iterator* MakeInputIterator(CompactionInfo* ci) {
   ReadOptions ropts;
 
+  fprintf(stderr, "Make input iterator\n");
+
   //const int space = ci->level == 0 ? ci->infiles[0].size() + 1 : 2;
   const int space = ci->infiles[0].size() + ci->infiles[2].size();
   Iterator** iter_list = new Iterator*[space];
   int num = 0;
 
   for (int which = 0; which < 2; which++) {
+    fprintf(stderr, "which %d\n", which);
     if (!ci->infiles[which].empty()) {
       //if (ci->level + which == 0) {
         const std::vector<RandomAccessFile*>& files = ci->infiles[which];
         const std::vector<int>& sizes = ci->infile_sizes[which];
         for (size_t i = 0; i < files.size(); i++) {
+          fprintf(stderr, "  file %lu\n", (long unsigned)i);
           Table* tbl;
           leveldb::Table::Open(*ci->opts, files[i], sizes[i], &tbl);
+          fprintf(stderr, "   open done\n");
           iter_list[num++] = tbl->NewIterator(ropts);
         }
       //} else {
@@ -124,7 +132,7 @@ bool DoCompaction(CompactionInfo* ci) {
   WritableFile* outfile = nullptr;
   int out_idx = -1;
 
-  return true;
+  fprintf(stderr, "seek to first\n");
 
   input->SeekToFirst();
 
@@ -136,6 +144,7 @@ bool DoCompaction(CompactionInfo* ci) {
 
   const Comparator* ucmp = ci->icmp->user_comparator();
 
+  fprintf(stderr, "start compaction loop\n");
   for (; input->Valid();) {
     Slice key = input->key();
 
@@ -158,6 +167,7 @@ bool DoCompaction(CompactionInfo* ci) {
 
       last_sequence_for_key = ikey.sequence;
     }
+    fprintf(stderr, "key: %s\n", ikey.user_key.ToString().c_str());
 
     if (!drop) {
       if (builder == nullptr) {
@@ -275,13 +285,13 @@ bool MakeResultInfo(CompactionInfo* ci) {
 Status CompactSST(int level, uint64_t sequence, std::vector<FileMeta>& input_files,
                   std::vector<FileMeta>& input2_files, std::vector<FileMeta>& output_files,
                   void* result_buf) {
-  fprintf(stderr, "CompacSST start\n");
+  fprintf(stderr, "CompactSST start\n");
 
   g_env = leveldb::Env::Default();
 
   CompactionInfo* ci = MakeCompctionInfo(level, sequence, input_files, input2_files, output_files, result_buf);
   bool ok = DoCompaction(ci);
-  fprintf(stderr, "CompacSST done\n");
+  fprintf(stderr, "CompactSST done\n");
   MakeResultInfo(ci);
   return Status::OK();
 }

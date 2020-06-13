@@ -12,7 +12,7 @@
 
 namespace leveldb {
 
-using FileMeta = std::pair<void*, uint32_t>; // physical address, file size in bytes
+using FileMeta = std::pair<void*, uint32_t>; // buffer, file size in bytes
 
 LEVELDB_EXPORT Status CompactSST(int level, uint64_t sequence,
                                  std::vector<FileMeta>& input_files,
