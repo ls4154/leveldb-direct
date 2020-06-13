@@ -100,6 +100,7 @@ target_sources(leveldb
     "${PROJECT_SOURCE_DIR}/db/dbformat.cc"
     "${PROJECT_SOURCE_DIR}/db/dbformat.h"
     "${PROJECT_SOURCE_DIR}/db/dumpfile.cc"
+    "${PROJECT_SOURCE_DIR}/db/compactsst.cc"
     "${PROJECT_SOURCE_DIR}/db/filename.cc"
     "${PROJECT_SOURCE_DIR}/db/filename.h"
     "${PROJECT_SOURCE_DIR}/db/log_format.h"
@@ -167,6 +168,7 @@ target_sources(leveldb
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/comparator.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/db.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/dumpfile.h"
+    "${LEVELDB_PUBLIC_INCLUDE_DIR}/compactsst.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/env.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/export.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/filter_policy.h"
@@ -241,6 +243,11 @@ add_executable(leveldbutil
 )
 target_link_libraries(leveldbutil leveldb)
 
+add_executable(ldbisp
+  "${PROJECT_SOURCE_DIR}/db/ldbisp.cc"
+)
+target_link_libraries(ldbisp leveldb)
+
 if(LEVELDB_INSTALL)
   include(GNUInstallDirs)
   install(TARGETS leveldb
@@ -256,6 +263,7 @@ if(LEVELDB_INSTALL)
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/comparator.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/db.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/dumpfile.h"
+      "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/compactsst.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/env.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/export.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/filter_policy.h"
