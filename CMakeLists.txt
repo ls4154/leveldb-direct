@@ -187,13 +187,6 @@ target_sources(leveldb
     "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
 )
 
-# MemEnv is not part of the interface and could be pulled to a separate library.
-target_sources(leveldb
-  PRIVATE
-    "${PROJECT_SOURCE_DIR}/helpers/memenv/memenv.cc"
-    "${PROJECT_SOURCE_DIR}/helpers/memenv/memenv.h"
-)
-
 target_include_directories(leveldb
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -295,7 +288,6 @@ if(LEVELDB_BUILD_TESTS)
 
   if(NOT BUILD_SHARED_LIBS)
     leveldb_test("${PROJECT_SOURCE_DIR}/db/autocompact_test.cc")
-    leveldb_test("${PROJECT_SOURCE_DIR}/db/corruption_test.cc")
     leveldb_test("${PROJECT_SOURCE_DIR}/db/db_test.cc")
     leveldb_test("${PROJECT_SOURCE_DIR}/db/dbformat_test.cc")
     leveldb_test("${PROJECT_SOURCE_DIR}/db/filename_test.cc")
@@ -305,8 +297,6 @@ if(LEVELDB_BUILD_TESTS)
     leveldb_test("${PROJECT_SOURCE_DIR}/db/version_edit_test.cc")
     leveldb_test("${PROJECT_SOURCE_DIR}/db/version_set_test.cc")
     leveldb_test("${PROJECT_SOURCE_DIR}/db/write_batch_test.cc")
-
-    leveldb_test("${PROJECT_SOURCE_DIR}/helpers/memenv/memenv_test.cc")
 
     leveldb_test("${PROJECT_SOURCE_DIR}/table/filter_block_test.cc")
     leveldb_test("${PROJECT_SOURCE_DIR}/table/table_test.cc")
