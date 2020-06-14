@@ -188,7 +188,19 @@ class LEVELDB_EXPORT Env {
   // Sleep/delay the thread for the prescribed number of micro-seconds.
   virtual void SleepForMicroseconds(int micros) = 0;
 
+  virtual Status OffloadBuffer(void** buf) = 0;
+
   virtual Status OffloadCompaction(void* input_buf, void* output_buf) = 0;
+
+  virtual bool OffloadCheck() = 0;
+
+  virtual int GetTableIdx(const std::string& fname) = 0;
+
+  virtual int ReserveIdx() = 0;
+
+  virtual void ReturnIdx(int idx) = 0;
+
+  virtual void AddTable(uint64_t fnum, uint64_t size, int idx) = 0;
 };
 
 // A file abstraction for reading sequentially through a file
@@ -370,8 +382,29 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
   void SleepForMicroseconds(int micros) override {
     target_->SleepForMicroseconds(micros);
   }
+  Status OffloadBuffer(void** buf) override {
+    return target_->OffloadBuffer(buf);
+  }
   Status OffloadCompaction(void* input_buf, void* output_buf) override {
     return target_->OffloadCompaction(input_buf, output_buf);
+  }
+
+  bool OffloadCheck() override {
+    return target_->OffloadCheck();
+  }
+
+  int GetTableIdx(const std::string& fname) override {
+    return target_->GetTableIdx(fname);
+  }
+
+  int ReserveIdx() override {
+    return target_->ReserveIdx();
+  }
+  void ReturnIdx(int idx) override {
+    target_->ReturnIdx(idx);
+  }
+  void AddTable(uint64_t fnum, uint64_t size, int idx) override {
+    target_->AddTable(fnum, size, idx);
   }
 
  private:

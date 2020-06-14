@@ -68,8 +68,51 @@ namespace leveldb {
 
 #define SPDK_NVME_OPC_COSMOS_WRITE 0x81
 #define SPDK_NVME_OPC_COSMOS_READ  0x82
+#define SPDK_NVME_OPC_COSMOS_OFFLOAD 0x83
 
 struct spdk_nvme_obj_cmd {
+  /* dword 0 */
+  uint16_t opc	:  8;	/* opcode */
+  uint16_t fuse	:  2;	/* fused operation */
+  uint16_t rsvd1	:  4;
+  uint16_t psdt	:  2;
+  uint16_t cid;		/* command identifier */
+
+  /* dword 1 */
+  uint32_t nsid;		/* namespace identifier */
+
+  /* dword 2-3 */
+  uint32_t buf_addr_lo;
+  uint32_t buf_addr_hi;
+
+  /* dword 4-5 */
+  uint64_t mptr;		/* metadata pointer */
+
+  /* dword 6-9: data pointer */
+  union {
+    struct {
+      uint64_t prp1;		/* prp entry 1 */
+      uint64_t prp2;		/* prp entry 2 */
+    } prp;
+
+    struct spdk_nvme_sgl_descriptor sgl1;
+  } dptr;
+
+  /* dword 10 */
+  uint32_t blkno;
+
+  /* dowrd 11 */
+  uint32_t cdw11;
+
+  /* dword 12-15 */
+  uint32_t sect_cnt;
+  uint32_t cdw13;
+  uint32_t cdw14;
+  uint32_t cdw15;
+};
+static_assert(sizeof(struct spdk_nvme_obj_cmd) == 64, "nvme cmd incorrect size");
+
+struct spdk_nvme_offload_cmd {
   /* dword 0 */
   uint16_t opc	:  8;	/* opcode */
   uint16_t fuse	:  2;	/* fused operation */
@@ -267,6 +310,16 @@ void obj_write_complete(void* arg, const struct spdk_nvme_cpl* completion)
 }
 
 void obj_read_complete(void* arg, const struct spdk_nvme_cpl* completion)
+{
+  int* compl_status = static_cast<int*>(arg);
+  *compl_status = 1;
+  if (spdk_nvme_cpl_is_error(completion)) {
+    fprintf(stderr, "spdk read cpl error\n");
+    *compl_status = 2;
+  }
+}
+
+void offload_complete(void* arg, const struct spdk_nvme_cpl* completion)
 {
   int* compl_status = static_cast<int*>(arg);
   *compl_status = 1;
@@ -1389,10 +1442,104 @@ class PosixEnv : public Env {
 
   void SleepForMicroseconds(int micros) override { ::usleep(micros); }
 
-  Status OffloadCompaction(void* input_buf, void* output_buf) override {
+  Status OffloadBuffer(void** buf) override {
+    *buf = spdk_malloc(4096, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                       SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+    if (*buf == NULL) {
+      fprintf(stderr, "offload buffer alloc\n");
+      exit(1);
+    }
     return Status::OK();
   }
 
+  int g_offload_cpl;
+  Status OffloadCompaction(void* input_buf, void* output_buf) override {
+    int rc;
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+
+    uint64_t paddr = spdk_vtophys(input_buf, NULL);
+
+    struct spdk_nvme_offload_cmd off_cmd = { 0, };
+    off_cmd.opc = SPDK_NVME_OPC_COSMOS_OFFLOAD;
+    off_cmd.buf_addr_lo = (paddr & 0xFFFFFFFFULL);
+    off_cmd.buf_addr_hi = (paddr >> 32);
+
+    struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&off_cmd);
+
+    g_offload_cpl = 0;
+
+    rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
+                                                     offload_complete, &g_offload_cpl);
+    if (rc != 0) {
+      fprintf(stderr, "spdk offload failed\n");
+      exit(1);
+    }
+    return Status::OK();
+  }
+
+  bool OffloadCheck() override {
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+
+    spdk_nvme_qpair_process_completions(qpair, 0);
+    if (g_offload_cpl)
+      return true;
+    else
+      return false;
+  }
+
+  int GetTableIdx(const std::string& fname) override {
+    int ret = -1;
+    g_fs_mtx.Lock();
+    if (g_file_table.count(fname)) {
+      ret = g_file_table[fname];
+    }
+    g_fs_mtx.Unlock();
+    return ret;
+  }
+
+  int ReserveIdx() override {
+    int ret = -1;
+    g_fs_mtx.Lock();
+    if (!g_free_idx.empty()) {
+      ret = g_free_idx.front();
+      g_free_idx.pop();
+    } else {
+      fprintf(stderr, "out of free idx\n");
+      exit(1);
+    }
+    g_fs_mtx.Unlock();
+    return ret;
+  }
+
+  void ReturnIdx(int idx) override {
+    g_fs_mtx.Lock();
+    g_free_idx.push(idx);
+    g_fs_mtx.Unlock();
+  }
+
+  void AddTable(uint64_t fnum, uint64_t size, int idx) override {
+    char buf[32] = { '\0', };
+    snprintf(buf, sizeof(buf), "%06llu.ldb",
+             static_cast<unsigned long long>(fnum));
+
+    g_fs_mtx.Lock();
+
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+    strcpy(meta->f_name, buf);
+    meta->f_name_len = strlen(buf);
+    meta->f_size = size;
+    meta->f_next_blk = 0;
+    msync(meta, META_SIZE, MS_SYNC);
+
+    g_file_table.insert({buf, idx});
+
+    fprintf(stderr, "Addtable %s, %d\n", buf, idx);
+    g_fs_mtx.Unlock();
+  }
 
  private:
   void BackgroundThreadMain();

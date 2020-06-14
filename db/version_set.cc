@@ -22,6 +22,8 @@
 
 namespace leveldb {
 
+class PosixEnv;
+
 static size_t TargetFileSize(const Options* options) {
   return options->max_file_size;
 }
@@ -1232,6 +1234,64 @@ void VersionSet::GetRange2(const std::vector<FileMetaData*>& inputs1,
   std::vector<FileMetaData*> all = inputs1;
   all.insert(all.end(), inputs2.begin(), inputs2.end());
   GetRange(all, smallest, largest);
+}
+
+void VersionSet::MakeOffloadBuffer(CompactionBuffer* cb, Compaction* c) {
+  fprintf(stderr, "make offload buffer\n");
+  cb->level = c->level();
+  cb->in_cnt = c->inputs_[0].size();
+  cb->in2_cnt = c->inputs_[1].size();
+  cb->out_cnt = cb->in_cnt + cb->in2_cnt + 1;
+  fprintf(stderr, "level %u\n", cb->level);
+  fprintf(stderr, "in cnt %u\n", cb->in_cnt);
+  fprintf(stderr, "in2 cnt %u\n", cb->in2_cnt);
+
+  int offset = 0;
+  uint32_t* in_sizes = (uint32_t*)&cb->data[offset];
+  fprintf(stderr, "in size\n");
+  for (int i = 0; i < cb->in_cnt; i++) {
+    in_sizes[i] = c->inputs_[0][i]->file_size;
+    fprintf(stderr, "    %u\n", in_sizes[i]);
+  }
+  offset += cb->in_cnt * sizeof(uint32_t);
+  uint32_t* in2_sizes = (uint32_t*)&cb->data[offset];
+  fprintf(stderr, "in2 size\n");
+  for (int i = 0; i < cb->in2_cnt; i++) {
+    in2_sizes[i] = c->inputs_[1][i]->file_size;
+    fprintf(stderr, "    %u\n", in2_sizes[i]);
+  }
+  offset += cb->in2_cnt * sizeof(uint32_t);
+  uint32_t* in_objs = (uint32_t*)&cb->data[offset];
+  fprintf(stderr, "in idx\n");
+  for (int i = 0; i < cb->in_cnt; i++) {
+    char buf[32];
+    uint64_t fnum = c->inputs_[0][i]->number;
+    snprintf(buf, sizeof(buf), "%06llu.ldb",
+             static_cast<unsigned long long>(fnum));
+    in_objs[i] = env_->GetTableIdx(buf);
+    fprintf(stderr, "    %u\n", in_objs[i]);
+  }
+  offset += cb->in_cnt * sizeof(uint32_t);
+  uint32_t* in2_objs = (uint32_t*)&cb->data[offset];
+  fprintf(stderr, "in2 idx\n");
+  for (int i = 0; i < cb->in2_cnt; i++) {
+    char buf[32];
+    uint64_t fnum = c->inputs_[1][i]->number;
+    snprintf(buf, sizeof(buf), "%06llu.ldb",
+             static_cast<unsigned long long>(fnum));
+    in2_objs[i] = env_->GetTableIdx(buf);
+    fprintf(stderr, "    %u\n", in2_objs[i]);
+  }
+  offset += cb->in2_cnt * sizeof(uint32_t);
+  uint32_t* out_objs = (uint32_t*)&cb->data[offset];
+  fprintf(stderr, "out idx\n");
+  for (int i = 0; i < cb->out_cnt; i++) {
+    out_objs[i] = env_->ReserveIdx();
+    if (out_objs[i] == -1) {
+      fprintf(stderr, "out of tables\n");
+      exit(1);
+    }
+  }
 }
 
 Iterator* VersionSet::MakeInputIterator(Compaction* c) {

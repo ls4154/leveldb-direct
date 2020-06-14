@@ -26,6 +26,15 @@
 
 namespace leveldb {
 
+struct CompactionBuffer {
+  uint32_t level;
+  uint64_t seq;
+  uint32_t in_cnt;
+  uint32_t in2_cnt;
+  uint32_t out_cnt;
+  char data[];
+} __attribute__((packed));
+
 namespace log {
 class Writer;
 }
@@ -243,6 +252,8 @@ class VersionSet {
   // Return the maximum overlapping data (in bytes) at next level for any
   // file at a level >= 1.
   int64_t MaxNextLevelOverlappingBytes();
+
+  void MakeOffloadBuffer(CompactionBuffer* cb, Compaction* c);
 
   // Create an iterator that reads over the compaction inputs for "*c".
   // The caller should delete the iterator when no longer needed.
