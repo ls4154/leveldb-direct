@@ -266,11 +266,11 @@ bool MakeResultInfo(CompactionInfo* ci) {
     outfile->Append(Slice((char*)&ci->outfile_sizes[i], sizeof(uint32_t)));
   }
   for (int i = 0; i < ci->out_cnt; i++) {
-    uint32_t klen = ci->outfile_smallest[i].user_key().size();
+    uint32_t klen = ci->outfile_smallest[i].Encode().size();
     outfile->Append(Slice((char*)(&klen), sizeof(uint32_t)));
     outfile->Append(ci->outfile_smallest[i].Encode());
 
-    klen = ci->outfile_largest[i].user_key().size();
+    klen = ci->outfile_largest[i].Encode().size();
     outfile->Append(Slice((char*)(&klen), sizeof(uint32_t)));
     outfile->Append(ci->outfile_largest[i].Encode());
   }
