@@ -95,7 +95,7 @@ Iterator* MakeInputIterator(CompactionInfo* ci) {
   fprintf(stderr, "Make input iterator\n");
 
   //const int space = ci->level == 0 ? ci->infiles[0].size() + 1 : 2;
-  const int space = ci->infiles[0].size() + ci->infiles[2].size();
+  const int space = ci->infiles[0].size() + ci->infiles[1].size();
   Iterator** iter_list = new Iterator*[space];
   int num = 0;
 
@@ -108,8 +108,12 @@ Iterator* MakeInputIterator(CompactionInfo* ci) {
         for (size_t i = 0; i < files.size(); i++) {
           fprintf(stderr, "  file %lu\n", (long unsigned)i);
           Table* tbl;
-          leveldb::Table::Open(*ci->opts, files[i], sizes[i], &tbl);
-          fprintf(stderr, "   open done\n");
+          Status s = leveldb::Table::Open(*ci->opts, files[i], sizes[i], &tbl);
+          if (!s.ok()) {
+            fprintf(stderr, "  Table open error\n");
+            exit(1);
+          }
+          //fprintf(stderr, "   open done\n");
           iter_list[num++] = tbl->NewIterator(ropts);
         }
       //} else {
@@ -143,6 +147,8 @@ bool DoCompaction(CompactionInfo* ci) {
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
 
   const Comparator* ucmp = ci->icmp->user_comparator();
+
+  int drop_cnt = 0;
 
   fprintf(stderr, "start compaction loop\n");
   for (; input->Valid();) {
@@ -209,10 +215,13 @@ bool DoCompaction(CompactionInfo* ci) {
                         static_cast<unsigned long long>(num_entries),
                         static_cast<unsigned long long>(file_size));
       }
+    } else {
+      drop_cnt++;
     }
     input->Next();
   }
-
+  fprintf(stderr, "loop out\n");
+  fprintf(stderr, " dropped %d\n", drop_cnt);
 
   if (builder != nullptr) {
     status = input->status();

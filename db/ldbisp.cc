@@ -105,7 +105,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       close(fd);
     }
 
-    if (id->output_cnt > MAX_FILE_CNT) {
+    if (id->output_cnt > 2 * MAX_FILE_CNT) {
       fprintf(stderr, "too many output files\n");
       exit(1);
     }
