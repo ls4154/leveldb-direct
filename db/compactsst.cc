@@ -270,19 +270,29 @@ bool MakeResultInfo(CompactionInfo* ci) {
     exit(1);
   }
 
+  int total_size = 0;
+
   outfile->Append(Slice(reinterpret_cast<char*>(&ci->out_cnt), sizeof(uint32_t)));
+  total_size += sizeof(uint32_t);
   for (int i = 0; i < ci->out_cnt; i++) {
     outfile->Append(Slice((char*)&ci->outfile_sizes[i], sizeof(uint32_t)));
+    total_size += sizeof(uint32_t);
   }
   for (int i = 0; i < ci->out_cnt; i++) {
     uint32_t klen = ci->outfile_smallest[i].Encode().size();
     outfile->Append(Slice((char*)(&klen), sizeof(uint32_t)));
+    total_size += sizeof(uint32_t);
     outfile->Append(ci->outfile_smallest[i].Encode());
+    total_size += klen;
 
     klen = ci->outfile_largest[i].Encode().size();
     outfile->Append(Slice((char*)(&klen), sizeof(uint32_t)));
+    total_size += sizeof(uint32_t);
     outfile->Append(ci->outfile_largest[i].Encode());
+    total_size += klen;
   }
+
+  fprintf("out buf size %d\n", total_size);
 
   delete outfile;
 
