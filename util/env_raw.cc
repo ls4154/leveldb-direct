@@ -625,12 +625,10 @@ PosixEnv::PosixEnv()
       }
     }
   } else {
-    if (real_dev) {
-      for (int i = 1; i < BLK_CNT; i++) {
-        struct RawFile *fptr = GetFptr(i);
-        fptr->f_type = FTYPE_FREE;
-        free_idx_.push(i);
-      }
+    for (int i = 1; i < BLK_CNT; i++) {
+      struct RawFile *fptr = GetFptr(i);
+      fptr->f_type = FTYPE_FREE;
+      free_idx_.push(i);
     }
     sb_ptr_->sb_magic = LDBFS_MAGIC;
   }
