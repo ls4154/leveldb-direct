@@ -115,7 +115,9 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       fprintf(stderr, "    %p\n", cshared->output_file[i]);
       output_files.push_back({cshared->output_file[i], 0});
     }
+    //asm volatile("": : :"memory");
     CompactSST(id->level, id->sequence, input_files, input2_files, output_files, host_buf_base);
+    //asm volatile("": : :"memory");
 
     *state = 3;
   }

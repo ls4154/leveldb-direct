@@ -1,6 +1,7 @@
-#include <bits/stdint-uintn.h>
 #include <cstdio>
 #include <cstdint>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include "db/dbformat.h"
 #include "db/version_set.h"
@@ -173,7 +174,7 @@ bool DoCompaction(CompactionInfo* ci) {
 
       last_sequence_for_key = ikey.sequence;
     }
-    fprintf(stderr, "key: %s\n", ikey.user_key.ToString().c_str());
+    //fprintf(stderr, "key: %s\n", ikey.user_key.ToString().c_str());
 
     if (!drop) {
       if (builder == nullptr) {
@@ -292,7 +293,7 @@ bool MakeResultInfo(CompactionInfo* ci) {
     total_size += klen;
   }
 
-  fprintf("out buf size %d\n", total_size);
+  fprintf(stderr, "out buf size %d\n", total_size);
 
   delete outfile;
 
@@ -312,6 +313,22 @@ Status CompactSST(int level, uint64_t sequence, std::vector<FileMeta>& input_fil
   bool ok = DoCompaction(ci);
   fprintf(stderr, "CompactSST done\n");
   MakeResultInfo(ci);
+
+  static int ccnt = 0;
+  fprintf(stderr, "creating debug output files %d\n", ++ccnt);
+  for (int i = 0; i < ci->out_cnt; i++) {
+    char fname[32];
+    int size = ci->outfile_sizes[i];
+    void* buf = output_files[i].first;
+    sprintf(fname, "%d-%d.ldb", ccnt, i);
+    int fd = open(fname, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    int wcnt = write(fd, buf, size);
+    fprintf(stderr, "  %s %dbytes\n", fname, size);
+    if (wcnt < size) {
+      fprintf(stderr, "  write only %d bytes\n", wcnt);
+    }
+  }
+
   return Status::OK();
 }
 
