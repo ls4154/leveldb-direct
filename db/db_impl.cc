@@ -25,6 +25,8 @@
 #include "db/write_batch_internal.h"
 #include "leveldb/db.h"
 #include "leveldb/env.h"
+#include "leveldb/iterator.h"
+#include "leveldb/options.h"
 #include "leveldb/status.h"
 #include "leveldb/table.h"
 #include "leveldb/table_builder.h"
@@ -964,8 +966,21 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     compact->outputs.push_back(out);
     env_->AddTable(out.number, out.file_size, output_idxs[i]);
 
+    if (out_sizes[i] > 0) {
+      fprintf(stderr, "  verify table\n");
+      Iterator* iter = table_cache_->NewIterator(ReadOptions(), out.number, out.file_size);
+      Status s = iter->status();
+      delete iter;
+      if (s.ok()) {
+        Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
+            (unsigned long long)out.number, compact->compaction->level(),
+            (unsigned long long)0,
+            (unsigned long long)out.file_size);
+      }
+    }
+
     char fname[30];
-    sprintf(fname, "%d-%d.ldb\n", compcnt, i);
+    sprintf(fname, "%d-%d.ldb", compcnt, i);
     env_->DbgOutput(fname, (int)output_idxs[i], (int)out_sizes[i]);
   }
   for (int i = rb->output_cnt; i < max_outputs; i++) {
