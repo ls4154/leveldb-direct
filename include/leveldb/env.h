@@ -201,6 +201,8 @@ class LEVELDB_EXPORT Env {
   virtual void ReturnIdx(int idx) = 0;
 
   virtual void AddTable(uint64_t fnum, uint64_t size, int idx) = 0;
+
+  virtual void DbgOutput(const char* fname, int idx, int size) = 0;
 };
 
 // A file abstraction for reading sequentially through a file
@@ -405,6 +407,9 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
   }
   void AddTable(uint64_t fnum, uint64_t size, int idx) override {
     target_->AddTable(fnum, size, idx);
+  }
+  virtual void DbgOutput(const char* fname, int idx, int size) override {
+    target_->DbgOutput(fname, idx, size);
   }
 
  private:

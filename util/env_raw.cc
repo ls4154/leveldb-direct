@@ -1541,6 +1541,32 @@ class PosixEnv : public Env {
     g_fs_mtx.Unlock();
   }
 
+  void DbgOutput(const char* fname, int idx, int size) override {
+    int fd = open(fname, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+      fprintf(stderr, "cannot open file\n");
+      return;
+    }
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "dbgoutput malloc failed\n");
+      exit(1);
+    }
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    obj_read_to_buf(ctrlr, qpair, fbuf, idx, ROUND_UP(size, SECT_SIZE) / SECT_SIZE, true);
+
+    fprintf(stderr, "create output %s %d bytes\n", fname, size);
+    int wcnt = write(fd, fbuf, size);
+    if (wcnt < size) {
+      fprintf(stderr, "  only %d bytes written\n", wcnt);
+    }
+
+  }
+
  private:
   void BackgroundThreadMain();
 
