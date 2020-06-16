@@ -976,6 +976,9 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
             (unsigned long long)out.number, compact->compaction->level(),
             (unsigned long long)0,
             (unsigned long long)out.file_size);
+      } else {
+      fprintf(stderr, "  verify failed\n");
+        exit(1);
       }
     }
 

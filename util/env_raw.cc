@@ -1092,6 +1092,10 @@ class PosixEnv : public Env {
       g_fs_mtx.Lock();
       int idx;
       if (!g_file_table.count(basename)) {
+        if (g_free_idx.empty()) {
+          fprintf(stderr, "out of obj idx\n");
+          exit(1);
+        }
         idx = g_free_idx.front();
         g_free_idx.pop();
         g_file_table.insert({basename, idx});
@@ -1141,6 +1145,10 @@ class PosixEnv : public Env {
       g_fs_mtx.Lock();
       int idx;
       if (!g_file_table.count(basename)) {
+        if (g_free_idx.empty()) {
+          fprintf(stderr, "out of obj idx\n");
+          exit(1);
+        }
         idx = g_free_idx.front();
         g_free_idx.pop();
         g_file_table.insert({basename, idx});
