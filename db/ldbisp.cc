@@ -19,7 +19,7 @@ struct CompactionShared {
   char input_file[MAX_FILE_CNT][MAX_OBJ_SIZE];
   char input2_file[MAX_FILE_CNT][MAX_OBJ_SIZE];
   char output_file[MAX_FILE_CNT * 2][MAX_OBJ_SIZE];
-  int state;
+  volatile int state;
   void* host_buf;
 } __attribute__((packed));
 
@@ -52,6 +52,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
 
     void* host_buf_base = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, (off_t)cshared->host_buf);
     InputData* id = reinterpret_cast<InputData*>(host_buf_base);
+    asm volatile("": : :"memory");
 
     fprintf(stderr, "level %u, sequence %llu\n", id->level, (long long)id->sequence);
 
@@ -115,9 +116,8 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       fprintf(stderr, "    %p\n", cshared->output_file[i]);
       output_files.push_back({cshared->output_file[i], 0});
     }
-    //asm volatile("": : :"memory");
     CompactSST(id->level, id->sequence, input_files, input2_files, output_files, host_buf_base);
-    //asm volatile("": : :"memory");
+    asm volatile("": : :"memory");
 
     *state = 3;
   }

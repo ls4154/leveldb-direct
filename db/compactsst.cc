@@ -314,6 +314,7 @@ Status CompactSST(int level, uint64_t sequence, std::vector<FileMeta>& input_fil
   fprintf(stderr, "CompactSST done\n");
   MakeResultInfo(ci);
 
+  /*
   static int ccnt = 0;
   fprintf(stderr, "creating debug output files %d\n", ++ccnt);
   for (int i = 0; i < ci->out_cnt; i++) {
@@ -328,6 +329,7 @@ Status CompactSST(int level, uint64_t sequence, std::vector<FileMeta>& input_fil
       fprintf(stderr, "  write only %d bytes\n", wcnt);
     }
   }
+  */
 
   return Status::OK();
 }
