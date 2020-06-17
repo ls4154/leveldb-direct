@@ -42,7 +42,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
   void* mmap_base = mmap(nullptr, sizeof(CompactionShared), PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, shmem_addr);
   CompactionShared* cshared = reinterpret_cast<CompactionShared*>(mmap_base);
   fprintf(stderr, "host_buf %p\n", cshared->host_buf);
-  int* state = &cshared->state;
+  volatile int* state = &cshared->state;
   fprintf(stderr, "start main loop\n");
   while (1) {
     while (*state != 2);
@@ -68,6 +68,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       fprintf(stderr, "    %p %u\n", cshared->input_file[i], size_arr[i]);
       input_files.push_back({cshared->input_file[i], size_arr[i]});
 
+      /*
       std::string tmpname = "aaaa" + std::to_string(i);
       int fd = open(tmpname.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
       if (fd < 0) {
@@ -79,6 +80,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       }
       fsync(fd);
       close(fd);
+      */
     }
 
     if (id->input2_cnt > MAX_FILE_CNT) {
@@ -93,6 +95,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       fprintf(stderr, "    %p %u\n", cshared->input2_file[i], size_arr[i]);
       input2_files.push_back({cshared->input2_file[i], size_arr[i]});
 
+      /*
       std::string tmpname = "bbbb" + std::to_string(i);
       int fd = open(tmpname.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
       if (fd < 0) {
@@ -104,6 +107,7 @@ bool StartCompactionDaemon(unsigned long shmem_addr) {
       }
       fsync(fd);
       close(fd);
+      */
     }
 
     if (id->output_cnt > 2 * MAX_FILE_CNT) {

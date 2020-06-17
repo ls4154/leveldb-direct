@@ -293,6 +293,11 @@ bool MakeResultInfo(CompactionInfo* ci) {
     total_size += klen;
   }
 
+  if (total_size > 4 * 1024 * 1024) {
+    fprintf(stderr, "out buf size\n");
+    exit(1);
+  }
+
   fprintf(stderr, "out buf size %d\n", total_size);
 
   delete outfile;
