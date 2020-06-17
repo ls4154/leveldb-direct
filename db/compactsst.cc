@@ -13,6 +13,7 @@
 #include "leveldb/options.h"
 #include "leveldb/table.h"
 #include "leveldb/table_builder.h"
+#include "table/iterator_wrapper.h"
 #include "table/merger.h"
 #include "table/two_level_iterator.h"
 
@@ -37,7 +38,7 @@ struct CompactionInfo {
   void* result_buf;
 };
 
-CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
+CompactionInfo* MakeCompactionInfo(int level, uint64_t sequence,
                                   std::vector<FileMeta>& input_files,
                                   std::vector<FileMeta>& input2_files,
                                   std::vector<FileMeta>& output_files,
@@ -92,6 +93,69 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
   return ci;
 }
 
+class LevelFileIterator : public Iterator {
+ public:
+  LevelFileIterator(const std::vector<RandomAccessFile*>& files, 
+                    const std::vector<int>& sizes,
+                    const Options& options, const ReadOptions& roptions)
+    : files_(files), sizes_(sizes), options_(options), roptions_(roptions),
+      iter_(nullptr), idx_(0) {
+  }
+  virtual void Seek(const Slice& target) {
+    assert(0);
+  }
+  virtual void SeekToFirst() {
+    idx_ = 0;
+    Table* tbl;
+    Status s = Table::Open(options_, files_[0], sizes_[0], &tbl);
+    if (!s.ok()) {
+      fprintf(stderr, "Table open error\n");
+      exit(1);
+    }
+    iter_.Set(tbl->NewIterator(roptions_));
+  }
+  virtual void SeekToLast() {
+    assert(0);
+  }
+  virtual void Next() {
+    iter_.Next();
+    if (!iter_.Valid()) {
+      idx_++;
+      if (idx_ < files_.size()) {
+        Table* tbl;
+        Status s = Table::Open(options_, files_[idx_], sizes_[idx_], &tbl);
+        if (!s.ok()) {
+          fprintf(stderr, "Table open error\n");
+          exit(1);
+        }
+        iter_.Set(tbl->NewIterator(roptions_));
+        iter_.SeekToFirst();
+      }
+    }
+  }
+  virtual void Prev() {
+    assert(0);
+  }
+  virtual bool Valid() const {
+    return iter_.Valid();
+  }
+  virtual Slice key() const {
+    return iter_.key();
+  }
+  virtual Slice value() const {
+    return iter_.value();
+  }
+  virtual Status status() const { return Status::OK(); }
+
+ private:
+  const std::vector<RandomAccessFile*>& files_;
+  const std::vector<int>& sizes_;
+  const Options& options_;
+  const ReadOptions& roptions_;
+  IteratorWrapper iter_;
+  int idx_;
+};
+
 Iterator* MakeInputIterator(CompactionInfo* ci) {
   ReadOptions ropts;
 
@@ -105,7 +169,7 @@ Iterator* MakeInputIterator(CompactionInfo* ci) {
   for (int which = 0; which < 2; which++) {
     fprintf(stderr, "which %d\n", which);
     if (!ci->infiles[which].empty()) {
-      //if (ci->level + which == 0) {
+      if (ci->level + which == 0) {
         const std::vector<RandomAccessFile*>& files = ci->infiles[which];
         const std::vector<int>& sizes = ci->infile_sizes[which];
         for (size_t i = 0; i < files.size(); i++) {
@@ -119,9 +183,11 @@ Iterator* MakeInputIterator(CompactionInfo* ci) {
           //fprintf(stderr, "   open done\n");
           iter_list[num++] = tbl->NewIterator(ropts);
         }
-      //} else {
-        // TODO use two level iterator
-      //}
+      } else {
+        const std::vector<RandomAccessFile*>& files = ci->infiles[which];
+        const std::vector<int>& sizes = ci->infile_sizes[which];
+        iter_list[num++] = new LevelFileIterator(files, sizes, *ci->opts, ropts);
+      }
     }
   }
   assert(num <= space);
@@ -316,7 +382,7 @@ Status CompactSST(int level, uint64_t sequence, std::vector<FileMeta>& input_fil
 
   g_env = leveldb::Env::Default();
 
-  CompactionInfo* ci = MakeCompctionInfo(level, sequence, input_files, input2_files, output_files, result_buf);
+  CompactionInfo* ci = MakeCompactionInfo(level, sequence, input_files, input2_files, output_files, result_buf);
   bool ok = DoCompaction(ci);
   fprintf(stderr, "CompactSST done\n");
   MakeResultInfo(ci);
