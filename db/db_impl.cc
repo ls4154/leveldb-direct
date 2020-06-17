@@ -923,6 +923,17 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   fprintf(stderr, "offload issued\n");
 
   while (1) {
+    if (has_imm_.load(std::memory_order_relaxed)) {
+      const uint64_t imm_start = env_->NowMicros();
+      mutex_.Lock();
+      if (imm_ != nullptr) {
+        CompactMemTable();
+        background_work_finished_signal_.SignalAll();
+      }
+      mutex_.Unlock();
+      imm_micros += (env_->NowMicros() - imm_start);
+    }
+
     if (env_->OffloadCheck())
       break;
   }
