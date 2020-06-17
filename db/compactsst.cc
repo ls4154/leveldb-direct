@@ -131,7 +131,7 @@ Iterator* MakeInputIterator(CompactionInfo* c) {
   return result;
 }
 
-CompactionInfo* MakeCompctionInfo(Env* env, std::string&dbname, int level,
+CompactionInfo* MakeCompactionInfo(Env* env, std::string&dbname, int level,
                                             std::vector<std::string>& in_files,
                                             std::vector<std::string>& in_files2,
                                             std::vector<std::string>& out_files,
@@ -147,6 +147,8 @@ CompactionInfo* MakeCompctionInfo(Env* env, std::string&dbname, int level,
   ci->table_cache = new TableCache(ci->dbname, *ci->opts, 100);
   ci->smallest_snapshot = seqnum;
   ci->max_output_file_size = max_file_size;
+
+  ci->opts->comparator = ci->icmp;
 
   fprintf(stderr, "Level %d: ", level);
   for (std::string& s : in_files) {
@@ -447,7 +449,7 @@ Status CompactSST(Env* env, std::string&dbname, int level,
                             std::vector<std::string>& in_files2,
                             std::vector<std::string>& out_files,
                             uint64_t seqnum, uint64_t max_file_size) {
-  CompactionInfo* ci = MakeCompctionInfo(env, dbname, level, in_files, in_files2,
+  CompactionInfo* ci = MakeCompactionInfo(env, dbname, level, in_files, in_files2,
                                                out_files, seqnum, max_file_size);
 
   struct timeval tv1, tv2;
