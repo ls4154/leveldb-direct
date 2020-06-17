@@ -961,7 +961,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 
     out.file_size = out_sizes[i];
     fprintf(stderr, " size %ld\n", (long)out.file_size);
-    assert(out.file_size > 4 * 1024 * 1024);
+    assert(out.file_size <= 4 * 1024 * 1024);
 
     compact->total_bytes += out_sizes[i];
 

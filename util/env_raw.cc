@@ -1572,6 +1572,7 @@ class PosixEnv : public Env {
     if (wcnt < size) {
       fprintf(stderr, "  only %d bytes written\n", wcnt);
     }
+    spdk_free(fbuf);
 
   }
 
