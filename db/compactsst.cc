@@ -55,6 +55,8 @@ CompactionInfo* MakeCompctionInfo(int level, uint64_t sequence,
   ci->icmp = new InternalKeyComparator(ci->opts->comparator);
   ci->result_buf = result_buf;
 
+  ci->opts->comparator = ci->icmp;
+
   fprintf(stderr, "level %d\n", level);
   for (FileMeta& fm : input_files) {
     std::string fname((char*)&fm.first, 4);
