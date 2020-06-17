@@ -113,6 +113,7 @@ class LevelFileIterator : public Iterator {
       exit(1);
     }
     iter_.Set(tbl->NewIterator(roptions_));
+    iter_.SeekToFirst();
   }
   virtual void SeekToLast() {
     assert(0);
@@ -161,8 +162,7 @@ Iterator* MakeInputIterator(CompactionInfo* ci) {
 
   fprintf(stderr, "Make input iterator\n");
 
-  //const int space = ci->level == 0 ? ci->infiles[0].size() + 1 : 2;
-  const int space = ci->infiles[0].size() + ci->infiles[1].size();
+  const int space = ci->level == 0 ? ci->infiles[0].size() + 1 : 2;
   Iterator** iter_list = new Iterator*[space];
   int num = 0;
 
