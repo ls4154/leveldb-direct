@@ -943,6 +943,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     uint32_t klen = *(uint32_t*)&rb->data[offset];
     offset += sizeof(uint32_t);
     fprintf(stderr, " smallest len %d\n", klen);
+    assert(klen >= 8);
 
     out.smallest.DecodeFrom(Slice(&rb->data[offset], klen));
     fprintf(stderr, " smallest %s\n", out.smallest.user_key().ToString().c_str());
@@ -950,6 +951,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 
     klen = *(uint32_t*)&rb->data[offset];
     offset += sizeof(uint32_t);
+    assert(klen >= 8);
 
     fprintf(stderr, " largest len %d\n", klen);
 
@@ -959,12 +961,18 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 
     out.file_size = out_sizes[i];
     fprintf(stderr, " size %ld\n", (long)out.file_size);
+    assert(out.file_size > 4 * 1024 * 1024);
 
     compact->total_bytes += out_sizes[i];
 
     pending_outputs_.insert(out.number);
     compact->outputs.push_back(out);
     env_->AddTable(out.number, out.file_size, output_idxs[i]);
+
+
+    char fname[30];
+    sprintf(fname, "%d-%d.ldb", compcnt, i);
+    env_->DbgOutput(fname, (int)output_idxs[i], (int)out_sizes[i]);
 
     if (out_sizes[i] > 0) {
       fprintf(stderr, "  verify table\n");
@@ -981,10 +989,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
         exit(1);
       }
     }
-
-    char fname[30];
-    sprintf(fname, "%d-%d.ldb", compcnt, i);
-    env_->DbgOutput(fname, (int)output_idxs[i], (int)out_sizes[i]);
   }
   for (int i = rb->output_cnt; i < max_outputs; i++) {
     fprintf(stderr, "return idx %d\n", output_idxs[i]);
