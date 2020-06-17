@@ -12,7 +12,7 @@
 namespace leveldb {
 namespace {
 
-#define MAX_FILE_CNT (12)
+#define MAX_FILE_CNT (24)
 #define MAX_OBJ_SIZE (4 * 1024 * 1024)
 
 struct CompactionShared {
