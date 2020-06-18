@@ -249,6 +249,10 @@ add_executable(leveldbutil
 )
 target_link_libraries(leveldbutil leveldb)
 
+add_executable(dumpsb
+  "${PROJECT_SOURCE_DIR}/db/dumpsb.cc"
+)
+
 target_link_libraries(leveldb
   spdk_nvme spdk_thread spdk_util spdk_log spdk_sock spdk_vmd spdk_env_dpdk
   dpdk rte_bus_pci rte_bus_vdev rte_cmdline rte_compressdev rte_cryptodev rte_eal rte_ethdev
