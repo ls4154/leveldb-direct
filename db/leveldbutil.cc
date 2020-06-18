@@ -42,6 +42,9 @@ bool HandleDumpCommand(Env* env, char** files, int num) {
 
 // Parse comma seperated list
 bool ParseFileList(char* s, std::vector<std::string>& v) {
+  if (!strcmp(s, "-")) {
+    return true;
+  }
   char* token = strtok(s, ", ");
   while (token) {
     v.push_back(token);
