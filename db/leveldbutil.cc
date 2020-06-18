@@ -41,19 +41,20 @@ bool HandleDumpCommand(Env* env, char** files, int num) {
 static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
-          "   dump files...         -- dump contents of specified files\n");
+          "   dump dbname files...         -- dump contents of specified files\n");
 }
 
 int main(int argc, char** argv) {
   leveldb::Env* env = leveldb::Env::Default();
   bool ok = true;
-  if (argc < 2) {
+  if (argc < 3) {
     Usage();
     ok = false;
   } else {
     std::string command = argv[1];
     if (command == "dump") {
-      ok = leveldb::HandleDumpCommand(env, argv + 2, argc - 2);
+      env->CreateDir(argv[2]);
+      ok = leveldb::HandleDumpCommand(env, argv + 3, argc - 3);
     } else {
       Usage();
       ok = false;
