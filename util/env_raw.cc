@@ -71,27 +71,27 @@ namespace leveldb {
 
 struct spdk_nvme_obj_cmd {
   /* dword 0 */
-  uint16_t opc	:  8;	/* opcode */
-  uint16_t fuse	:  2;	/* fused operation */
-  uint16_t rsvd1	:  4;
-  uint16_t psdt	:  2;
-  uint16_t cid;		/* command identifier */
+  uint16_t opc  : 8;    /* opcode */
+  uint16_t fuse : 2;    /* fused operation */
+  uint16_t rsvd1: 4;
+  uint16_t psdt : 2;
+  uint16_t cid;         /* command identifier */
 
   /* dword 1 */
-  uint32_t nsid;		/* namespace identifier */
+  uint32_t nsid;        /* namespace identifier */
 
   /* dword 2-3 */
   uint32_t buf_addr_lo;
   uint32_t buf_addr_hi;
 
   /* dword 4-5 */
-  uint64_t mptr;		/* metadata pointer */
+  uint64_t mptr;        /* metadata pointer */
 
   /* dword 6-9: data pointer */
   union {
     struct {
-      uint64_t prp1;		/* prp entry 1 */
-      uint64_t prp2;		/* prp entry 2 */
+      uint64_t prp1;    /* prp entry 1 */
+      uint64_t prp2;    /* prp entry 2 */
     } prp;
 
     struct spdk_nvme_sgl_descriptor sgl1;
