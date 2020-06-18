@@ -128,6 +128,7 @@ target_sources(leveldb
     "${PROJECT_SOURCE_DIR}/db/version_set.h"
     "${PROJECT_SOURCE_DIR}/db/write_batch_internal.h"
     "${PROJECT_SOURCE_DIR}/db/write_batch.cc"
+    "${PROJECT_SOURCE_DIR}/db/compactsst.cc"
     "${PROJECT_SOURCE_DIR}/port/port_stdcxx.h"
     "${PROJECT_SOURCE_DIR}/port/port.h"
     "${PROJECT_SOURCE_DIR}/port/thread_annotations.h"
@@ -185,6 +186,7 @@ target_sources(leveldb
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/table_builder.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/table.h"
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
+    "${LEVELDB_PUBLIC_INCLUDE_DIR}/compactsst.h"
 )
 
 target_sources(leveldb
@@ -417,6 +419,7 @@ if(LEVELDB_INSTALL)
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/table_builder.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/table.h"
       "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
+      "${PROJECT_SOURCE_DIR}/${LEVELDB_PUBLIC_INCLUDE_DIR}/compactsst.h"
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/leveldb
   )
 

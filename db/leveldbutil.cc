@@ -3,8 +3,13 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string>
+#include <vector>
 
 #include "leveldb/dumpfile.h"
+#include "leveldb/compactsst.h"
 #include "leveldb/env.h"
 #include "leveldb/status.h"
 
@@ -35,13 +40,54 @@ bool HandleDumpCommand(Env* env, char** files, int num) {
   return ok;
 }
 
+// Parse comma seperated list
+bool ParseFileList(char* s, std::vector<std::string>& v) {
+  char* token = strtok(s, ", ");
+  while (token) {
+    v.push_back(token);
+    token = strtok(nullptr, ", ");
+  }
+  return true;
+}
+
+bool HandleCompactCommand(Env* env, char** argv, int argc) {
+  if (argc < 7) {
+    fprintf(stderr, "compact: missing arguments\n");
+    return false;
+  }
+
+  std::string dbname;
+  int level;
+  std::vector<std::string> in_files;
+  std::vector<std::string> in_files2;
+  std::vector<std::string> out_files;
+  uint64_t seqnum;
+  uint64_t max_file_size;
+
+  dbname = argv[0];
+  level = atoi(argv[1]);
+  ParseFileList(argv[2], in_files);
+  ParseFileList(argv[3], in_files2);
+  ParseFileList(argv[4], out_files);
+  seqnum = strtoull(argv[5], nullptr, 10);
+  max_file_size = strtoull(argv[6], nullptr, 10);
+
+  Status s = CompactSST(env, dbname, level, in_files, in_files2, out_files, seqnum, max_file_size);
+  if (!s.ok()) {
+    fprintf(stderr, "%s\n", s.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 }  // namespace leveldb
 
 static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
-          "   dump dbname files...         -- dump contents of specified files\n");
+          "   dump dbname files...         -- dump contents of specified files\n"
+          "   compact dbname level infiles infiles2 outfiles sequence filesize -- compact sstables\n");
 }
 
 int main(int argc, char** argv) {
@@ -55,6 +101,9 @@ int main(int argc, char** argv) {
     if (command == "dump") {
       env->CreateDir(argv[2]);
       ok = leveldb::HandleDumpCommand(env, argv + 3, argc - 3);
+    } else if(command == "compact") {
+      env->CreateDir(argv[2]);
+      ok = leveldb::HandleCompactCommand(env, argv + 2, argc - 2);
     } else {
       Usage();
       ok = false;
