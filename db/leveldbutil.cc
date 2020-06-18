@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -83,14 +84,50 @@ bool HandleCompactCommand(Env* env, char** argv, int argc) {
   return true;
 }
 
+bool HandlePutCommand(Env* env, char** argv, int argc) {
+
+  if (argc < 3) {
+    fprintf(stderr, "put: missing arguments\n");
+    return false;
+  }
+  std::string dbname = argv[0];
+  std::string fname = argv[1];
+  int sstnum = atoi(argv[2]);
+
+  int fd = open(fname.c_str(), O_RDONLY);
+  if (fd == -1) {
+    perror("open file error\n");
+    return false;
+  }
+
+  char namebuf[64];
+  sprintf(namebuf, "%06d.ldb", sstnum);
+  std::string sstname = namebuf;
+
+  WritableFile* f;
+  env->NewWritableFile(sstname, &f);
+
+  char* buf = (char*)malloc(4 * 1024 * 1024);
+  int rcnt = read(fd, buf, 4 * 1024 * 1024);
+  f->Append(Slice(buf, rcnt));
+  f->Sync();
+  f->Close();
+  delete f;
+  fprintf(stderr, "file %d bytes written\n", rcnt);
+
+  return true;
+}
+
 }  // namespace
 }  // namespace leveldb
 
 static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
-          "   dump dbname files...         -- dump contents of specified files\n"
-          "   compact dbname level infiles infiles2 outfiles sequence filesize -- compact sstables\n");
+          "   dump dbname files...                              -- dump contents of specified files\n"
+          "   compact dbname level infiles infiles2 outfiles sequence filesize  -- compact sstables\n"
+          "   put dbname file sstnum                                                 -- add sstable\n");
+
 }
 
 int main(int argc, char** argv) {
@@ -107,6 +144,9 @@ int main(int argc, char** argv) {
     } else if(command == "compact") {
       env->CreateDir(argv[2]);
       ok = leveldb::HandleCompactCommand(env, argv + 2, argc - 2);
+    } else if(command == "put") {
+      env->CreateDir(argv[2]);
+      ok = leveldb::HandlePutCommand(env, argv + 2, argc - 2);
     } else {
       Usage();
       ok = false;
