@@ -84,6 +84,8 @@ struct DBImpl::CompactionState {
   TableBuilder* builder;
 
   uint64_t total_bytes;
+
+  std::vector<WritableFile*> writable_files;
 };
 
 // Fix user-supplied options to be reasonable
@@ -831,29 +833,12 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   delete compact->builder;
   compact->builder = nullptr;
 
-  // Finish and check for file errors
   if (s.ok()) {
-    s = compact->outfile->Sync();
+    s = compact->outfile->AsyncSync();
   }
-  if (s.ok()) {
-    s = compact->outfile->Close();
-  }
-  delete compact->outfile;
+  compact->writable_files.push_back(compact->outfile);
   compact->outfile = nullptr;
 
-  if (s.ok() && current_entries > 0) {
-    // Verify that the table is usable
-    Iterator* iter =
-        table_cache_->NewIterator(ReadOptions(), output_number, current_bytes);
-    s = iter->status();
-    delete iter;
-    if (s.ok()) {
-      Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
-          (unsigned long long)output_number, compact->compaction->level(),
-          (unsigned long long)current_entries,
-          (unsigned long long)current_bytes);
-    }
-  }
   return s;
 }
 
@@ -1009,6 +994,35 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   }
   delete input;
   input = nullptr;
+
+  for (int i = 0; i < compact->writable_files.size(); i++) {
+    WritableFile* wfile = compact->writable_files[i];
+    Status s;
+
+    while (wfile->CheckSync() == false);
+    s = wfile->Close();
+    if (!s.ok()) {
+      fprintf(stderr, "close failed\n");
+      exit(1);
+    }
+    delete wfile;
+
+    const uint64_t output_number = compact->outputs[i].number;
+    const uint64_t current_bytes = compact->outputs[i].file_size;
+
+    Iterator* iter = table_cache_->NewIterator(ReadOptions(), output_number,
+                                               current_bytes);
+    s = iter->status();
+    delete iter;
+    if (!s.ok()) {
+      fprintf(stderr, "iterator bad\n");
+      exit(1);
+    }
+    Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
+        (unsigned long long)output_number, compact->compaction->level(),
+        (unsigned long long)0,
+        (unsigned long long)current_bytes);
+  }
 
   CompactionStats stats;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;

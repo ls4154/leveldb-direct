@@ -308,13 +308,10 @@ void read_to_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
-// TODO: offset support
 void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                        void* buf, uint32_t blkno, uint32_t cnt, bool chk_completion)
+                        void* buf, uint32_t blkno, uint32_t cnt, int* chk_compl)
 {
   int rc;
-  int cpl = 0;
-
   uint64_t paddr = spdk_vtophys(buf, NULL);
 
   struct spdk_nvme_obj_cmd obj_cmd = { 0, };
@@ -326,23 +323,31 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
 
   struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&obj_cmd);
 
+  if (chk_compl != nullptr) {
+    rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
+                                                     obj_write_complete, chk_compl);
+    if (rc != 0) {
+      fprintf(stderr, "spdk io raw write failed\n");
+      exit(1);
+    }
+    return;
+  }
+
+  int l_chk_compl = 0;
   rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
-                                                   obj_write_complete, &cpl);
+                                                   obj_write_complete, &l_chk_compl);
   if (rc != 0) {
     fprintf(stderr, "spdk io raw write failed\n");
     exit(1);
   }
-  if (!chk_completion)
-    return;
-  while (!cpl)
+  while (!l_chk_compl)
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
 void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                       void* buf, uint32_t blkno, uint32_t cnt, bool chk_completion)
+                       void* buf, uint32_t blkno, uint32_t cnt, int* chk_compl)
 {
   int rc;
-  int cpl = 0;
 
   uint64_t paddr = spdk_vtophys(buf, NULL);
 
@@ -355,16 +360,30 @@ void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpai
 
   struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&obj_cmd);
 
+  if (chk_compl != nullptr) {
+    rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
+                                                     obj_read_complete, &chk_compl);
+    if (rc != 0) {
+      fprintf(stderr, "spdk io raw readfailed\n");
+      exit(1);
+    }
+    return;
+  }
+
+  int l_chk_compl = 0;
   rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
-                                                   obj_read_complete, &cpl);
+                                                   obj_read_complete, &l_chk_compl);
   if (rc != 0) {
     fprintf(stderr, "spdk io raw readfailed\n");
     exit(1);
   }
-  if (!chk_completion)
-    return;
-  while (!cpl)
+  while (!l_chk_compl)
     spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
+void check_completion(struct spdk_nvme_qpair* qpair)
+{
+  spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
 void init_spdk(void)
@@ -720,7 +739,7 @@ class RawSequentialFile final : public SequentialFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -767,7 +786,7 @@ class RawRandomAccessFile final : public RandomAccessFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -797,7 +816,7 @@ class RawWritableFile final : public WritableFile {
  public:
   RawWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
       : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
-        size_(g_sb_ptr->sb_meta[idx].f_size) {
+        size_(g_sb_ptr->sb_meta[idx].f_size), compl_status_(0) {
     if (truncate) {
       size_ = 0;
       return;
@@ -809,7 +828,7 @@ class RawWritableFile final : public WritableFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, true);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -857,11 +876,37 @@ class RawWritableFile final : public WritableFile {
     }
     uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
 
-    obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, true);
+    obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
     return Status::OK();
+  }
+
+  Status AsyncSync() override {
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
+
+    obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, &compl_status_);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
+    return Status::OK();
+  }
+
+  bool CheckSync() override {
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (compl_status_ == 0)
+      check_completion(qpair);
+    return compl_status_ > 0 ? true : false;
   }
 
  private:
@@ -870,6 +915,7 @@ class RawWritableFile final : public WritableFile {
   uint32_t size_;
   int idx_;
   bool closed_;
+  int compl_status_;
 };
 
 int LockOrUnlock(int fd, bool lock) {
