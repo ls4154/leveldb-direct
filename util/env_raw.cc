@@ -49,6 +49,12 @@ extern "C" {
 #include "spdk/env.h"
 }
 
+#ifdef NDEBUG
+#define dprint(...) do { } while (0)
+#else
+#define dprint(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
+#endif
+
 namespace leveldb {
 
 #define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
@@ -364,7 +370,7 @@ void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpai
     rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
                                                      obj_read_complete, &chk_compl);
     if (rc != 0) {
-      fprintf(stderr, "spdk io raw readfailed\n");
+      fprintf(stderr, "spdk io raw read failed\n");
       exit(1);
     }
     return;
@@ -374,7 +380,7 @@ void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpai
   rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ctrlr, qpair, nvme_cmd,
                                                    obj_read_complete, &l_chk_compl);
   if (rc != 0) {
-    fprintf(stderr, "spdk io raw readfailed\n");
+    fprintf(stderr, "spdk io raw read failed\n");
     exit(1);
   }
   while (!l_chk_compl)
@@ -980,7 +986,7 @@ class PosixEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
-    fprintf(stderr, "NewSequentialFile %s\n", filename.c_str());
+    dprint("NewSequentialFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
 
@@ -1019,7 +1025,7 @@ class PosixEnv : public Env {
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
-    fprintf(stderr, "NewRandomFile %s\n", filename.c_str());
+    dprint("NewRandomAccessFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
 
@@ -1074,7 +1080,7 @@ class PosixEnv : public Env {
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    fprintf(stderr, "NewWritableFile %s\n", filename.c_str());
+    dprint("NewWritableFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
 
@@ -1123,7 +1129,7 @@ class PosixEnv : public Env {
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    fprintf(stderr, "NewAppendableFile %s\n", filename.c_str());
+    dprint("NewAppendableFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
 
@@ -1212,7 +1218,7 @@ class PosixEnv : public Env {
   }
 
   Status DeleteFile(const std::string& filename) override {
-    fprintf(stderr, "DeleteFile %s\n", filename.c_str());
+    dprint("DeleteFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
 
@@ -1283,7 +1289,7 @@ class PosixEnv : public Env {
       g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
       FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
       if (sb_meta->sb_magic == LDBFS_MAGIC) {
-        fprintf(stderr, "ldbfs found\n");
+        dprint("ldbfs found\n");
         for (int i = 1; i < BLK_CNT; i++) {
           FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
           if (meta_ent->f_name_len == 0) {
@@ -1315,7 +1321,7 @@ class PosixEnv : public Env {
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
-    fprintf(stderr, "GetFileSize %s\n", filename.c_str());
+    dprint("GetFileSize %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
 
@@ -1350,7 +1356,7 @@ class PosixEnv : public Env {
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
-    fprintf(stderr, "RenameFile %s %s\n", from.c_str(), to.c_str());
+    dprint("RenameFile %s %s\n", from.c_str(), to.c_str());
 
     std::string basename_from = Basename(from).ToString();
     std::string basename_to = Basename(to).ToString();
