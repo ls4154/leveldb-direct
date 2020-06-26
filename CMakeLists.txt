@@ -16,13 +16,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (WIN32)
-  set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_WINDOWS)
-  # TODO(cmumford): Make UNICODE configurable for Windows.
-  add_definitions(-D_UNICODE -DUNICODE)
-else (WIN32)
-  set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_POSIX)
-endif (WIN32)
+set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_POSIX)
 
 option(LEVELDB_BUILD_TESTS "Build LevelDB's unit tests" ON)
 option(LEVELDB_BUILD_BENCHMARKS "Build LevelDB's benchmarks" ON)
@@ -193,19 +187,11 @@ target_sources(leveldb
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
 )
 
-if (WIN32)
-  target_sources(leveldb
-    PRIVATE
-      "${PROJECT_SOURCE_DIR}/util/env_windows.cc"
-      "${PROJECT_SOURCE_DIR}/util/windows_logger.h"
-  )
-else (WIN32)
-  target_sources(leveldb
-    PRIVATE
-      "${PROJECT_SOURCE_DIR}/util/env_raw.cc"
-      "${PROJECT_SOURCE_DIR}/util/raw_logger.h"
-  )
-endif (WIN32)
+target_sources(leveldb
+PRIVATE
+  "${PROJECT_SOURCE_DIR}/util/env_raw.cc"
+  "${PROJECT_SOURCE_DIR}/util/raw_logger.h"
+)
 
 # MemEnv is not part of the interface and could be pulled to a separate library.
 target_sources(leveldb
