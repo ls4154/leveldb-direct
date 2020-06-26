@@ -68,8 +68,6 @@ namespace leveldb {
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
-#define READ_UNIT (16 * 1024)             // Read granularity
-
 #define BUF_ALIGN (0x1000)
 
 struct FileMeta {
@@ -223,34 +221,50 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 }
 
 void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                    void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
+                    void *buf, uint64_t lba, uint32_t cnt, int* chk_compl)
 {
   int rc;
-  int cpl = 0;
-  rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, &cpl, 0);
+
+  if (chk_compl != nullptr) {
+    rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, chk_compl, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk cmd wirte failed\n");
+      exit(1);
+    }
+    return;
+  }
+
+  int l_chk_cpl = 0;
+  rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, &l_chk_cpl, 0);
   if (rc != 0) {
     fprintf(stderr, "spdk write failed\n");
     exit(1);
   }
-  if (!chk_completion)
-    return;
-  while (!cpl)
+  while (!l_chk_cpl)
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
 void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                 void *buf, uint64_t lba, uint32_t cnt, bool chk_completion)
+                 void *buf, uint64_t lba, uint32_t cnt, int* chk_compl)
 {
   int rc;
-  int cpl = 0;
-  rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &cpl, 0);
+
+  if (chk_compl != nullptr) {
+    rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, chk_compl, 0);
+    if (rc != 0) {
+      fprintf(stderr, "spdk cmd read failed\n");
+      exit(1);
+    }
+    return;
+  }
+
+  int l_chk_cpl = 0;
+  rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &l_chk_cpl, 0);
   if (rc != 0) {
     fprintf(stderr, "spdk read failed\n");
     exit(1);
   }
-  if (!chk_completion)
-    return;
-  while (!cpl)
+  while (!l_chk_cpl)
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
@@ -617,7 +631,7 @@ class RawSequentialFile final : public SequentialFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+                ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -664,7 +678,7 @@ class RawRandomAccessFile final : public RandomAccessFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+                ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -677,10 +691,15 @@ class RawRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     Status status;
-    n = std::min(n, size_ - offset);
+    if (offset + n > size_) {
+      *result = Slice();
+      return PosixError(filename_, EINVAL);
+    }
+
     // memcpy(scratch, buf_ + offset, n);
     // *result = Slice(scratch, n);
     *result = Slice(buf_ + offset, n);
+
     return status;
   }
 
@@ -709,7 +728,7 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, true);
+                ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -761,7 +780,7 @@ class RawWritableFile final : public WritableFile {
                    ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
     uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
 
-    write_from_buf(ns, qpair, target_buf, lba, cnt, true);
+    write_from_buf(ns, qpair, target_buf, lba, cnt, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
