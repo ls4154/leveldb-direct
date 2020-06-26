@@ -734,9 +734,9 @@ class PosixWritableFile final : public WritableFile {
 };
 
 // Implements sequential read access in a file using SPDK io cmd.
-class RawSequentialFile final : public SequentialFile {
+class ObjSequentialFile final : public SequentialFile {
  public:
-  RawSequentialFile(std::string filename, char* file_buf, int idx)
+  ObjSequentialFile(std::string filename, char* file_buf, int idx)
       : filename_(filename), buf_(file_buf), offset_(0), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
@@ -751,7 +751,7 @@ class RawSequentialFile final : public SequentialFile {
       ns_ent->qpair_mtx.Unlock();
     }
   }
-  ~RawSequentialFile() override {
+  ~ObjSequentialFile() override {
     spdk_free(buf_);
   }
 
@@ -781,9 +781,9 @@ class RawSequentialFile final : public SequentialFile {
 };
 
 // Implements random read access in a file using SPDK io cmd.
-class RawRandomAccessFile final : public RandomAccessFile {
+class ObjRandomAccessFile final : public RandomAccessFile {
  public:
-  RawRandomAccessFile(std::string filename, char* file_buf, int idx)
+  ObjRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
@@ -799,7 +799,7 @@ class RawRandomAccessFile final : public RandomAccessFile {
     }
   }
 
-  ~RawRandomAccessFile() override {
+  ~ObjRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -820,9 +820,9 @@ class RawRandomAccessFile final : public RandomAccessFile {
   int idx_;
 };
 
-class RawWritableFile final : public WritableFile {
+class ObjWritableFile final : public WritableFile {
  public:
-  RawWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
+  ObjWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
       : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
         size_(g_sb_ptr->sb_meta[idx].f_size), compl_status_(0) {
     if (truncate) {
@@ -842,7 +842,7 @@ class RawWritableFile final : public WritableFile {
     }
   }
 
-  ~RawWritableFile() override {
+  ~ObjWritableFile() override {
     if (!closed_)
       Close();
     spdk_free(buf_);
@@ -1011,7 +1011,7 @@ class PosixEnv : public Env {
         fprintf(stderr, "NewSequentialFile malloc failed\n");
         exit(1);
       }
-      *result = new RawSequentialFile(basename, fbuf, idx);
+      *result = new ObjSequentialFile(basename, fbuf, idx);
     } else {
       int fd = ::open(filename.c_str(), O_RDONLY);
       if (fd < 0) {
@@ -1050,7 +1050,7 @@ class PosixEnv : public Env {
         fprintf(stderr, "NewRandomAccessFile malloc failed\n");
         exit(1);
       }
-      *result = new RawRandomAccessFile(basename, fbuf, idx);
+      *result = new ObjRandomAccessFile(basename, fbuf, idx);
     } else {
       // TODO: use posix mmap file
       *result = nullptr;
@@ -1118,7 +1118,7 @@ class PosixEnv : public Env {
         fprintf(stderr, "NewWritableFile malloc failed\n");
         exit(1);
       }
-      *result = new RawWritableFile(basename, fbuf, idx, true);
+      *result = new ObjWritableFile(basename, fbuf, idx, true);
     } else {
       int fd = ::open(filename.c_str(), O_TRUNC | O_WRONLY | O_CREAT, 0644);
       if (fd < 0) {
@@ -1171,7 +1171,7 @@ class PosixEnv : public Env {
         fprintf(stderr, "NewAppendableFile malloc failed\n");
         exit(1);
       }
-      *result = new RawWritableFile(basename, fbuf, idx, false);
+      *result = new ObjWritableFile(basename, fbuf, idx, false);
     } else {
       int fd = ::open(filename.c_str(), O_APPEND | O_WRONLY | O_CREAT, 0644);
       if (fd < 0) {
