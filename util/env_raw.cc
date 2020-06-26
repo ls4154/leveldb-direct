@@ -32,7 +32,6 @@
 #include <type_traits>
 #include <utility>
 
-#include "db/filename.h"
 #include "leveldb/env.h"
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
@@ -40,6 +39,8 @@
 #include "port/thread_annotations.h"
 #include "util/env_posix_test_helper.h"
 #include "util/posix_logger.h"
+
+#include "db/filename.h"
 
 extern "C" {
 #include "spdk/stdinc.h"
@@ -1092,6 +1093,10 @@ class PosixEnv : public Env {
       g_fs_mtx.Lock();
       int idx;
       if (!g_file_table.count(basename)) {
+        if (g_free_idx.empty()) {
+          fprintf(stderr, "out of blocks\n");
+          exit(1);
+        }
         idx = g_free_idx.front();
         g_free_idx.pop();
         g_file_table.insert({basename, idx});
@@ -1141,6 +1146,10 @@ class PosixEnv : public Env {
       g_fs_mtx.Lock();
       int idx;
       if (!g_file_table.count(basename)) {
+        if (g_free_idx.empty()) {
+          fprintf(stderr, "out of blocks\n");
+          exit(1);
+        }
         idx = g_free_idx.front();
         g_free_idx.pop();
         g_file_table.insert({basename, idx});
@@ -1307,9 +1316,8 @@ class PosixEnv : public Env {
           g_free_idx.push(i);
         }
       }
+      g_fs_mtx.Unlock();
     }
-
-    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
