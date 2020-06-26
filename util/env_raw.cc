@@ -68,6 +68,8 @@ namespace leveldb {
 #define FS_SIZE (BLK_SIZE * BLK_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
+#define READ_UNIT (16 * 1024)             // Read granularity
+
 #define BUF_ALIGN (0x1000)
 
 struct FileMeta {
