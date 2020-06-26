@@ -627,9 +627,9 @@ class RawSequentialFile final : public SequentialFile {
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
     n = std::min(n, size_ - offset_);
-    memcpy(scratch, buf_ + offset_, n);
-    *result = Slice(scratch, n);
-    //*result = Slice(buf_ + offset_, n);
+    // memcpy(scratch, buf_ + offset_, n);
+    // *result = Slice(scratch, n);
+    *result = Slice(buf_ + offset_, n);
     offset_ += n;
     return status;
   }
@@ -676,8 +676,9 @@ class RawRandomAccessFile final : public RandomAccessFile {
               char* scratch) const override {
     Status status;
     n = std::min(n, size_ - offset);
-    memcpy(scratch, buf_ + offset, n);
-    *result = Slice(scratch, n);
+    // memcpy(scratch, buf_ + offset, n);
+    // *result = Slice(scratch, n);
+    *result = Slice(buf_ + offset, n);
     return status;
   }
 
