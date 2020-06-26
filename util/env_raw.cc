@@ -268,6 +268,11 @@ void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
     spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
+void check_completion(struct spdk_nvme_qpair* qpair)
+{
+  spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
 void init_spdk(void)
 {
   int rc;
