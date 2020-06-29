@@ -574,6 +574,17 @@ class PosixEnv : public Env {
       result->emplace_back(entry->d_name);
     }
     ::closedir(dir);
+
+    std::string directory_path2 = "/mnt/" + directory_path;
+    dir = ::opendir(directory_path2.c_str());
+    if (dir == nullptr) {
+      return PosixError(directory_path, errno);
+    }
+    while ((entry = ::readdir(dir)) != nullptr) {
+      result->emplace_back(entry->d_name);
+    }
+    ::closedir(dir);
+
     return Status::OK();
   }
 
@@ -587,6 +598,10 @@ class PosixEnv : public Env {
   Status CreateDir(const std::string& dirname) override {
     if (::mkdir(dirname.c_str(), 0755) != 0) {
       return PosixError(dirname, errno);
+    }
+    std::string dirname2 = "/mnt/" + dirname;
+    if (::mkdir(dirname2.c_str(), 0755) != 0) {
+      return PosixError(dirname2, errno);
     }
     return Status::OK();
   }
