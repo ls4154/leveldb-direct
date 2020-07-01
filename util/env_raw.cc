@@ -62,10 +62,10 @@ namespace leveldb {
 #define ROUND_DOWN(N, S) ((N) / (S) * (S))
 
 #define LDBFS_MAGIC (0xe51ab1541542020full)
-#define BLK_SIZE (4ULL * 1024 * 1024)     // 4 MiB per block
+#define OBJ_SIZE (4ULL * 1024 * 1024)     // 4 MiB per object
 #define META_SIZE (128)
-#define BLK_CNT (BLK_SIZE / META_SIZE)    // maximum blocks in LDBFS
-#define FS_SIZE (BLK_SIZE * BLK_CNT)
+#define OBJ_CNT (OBJ_SIZE / META_SIZE)    // maximum objs in LDBFS
+#define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
 #define BUF_ALIGN (0x1000)
@@ -74,7 +74,7 @@ struct FileMeta {
   union {
     struct {
       uint32_t f_size;
-      uint16_t f_next_blk;
+      uint16_t f_reserved;
       uint8_t  f_name_len;
     };
     uint64_t   sb_magic;
@@ -83,7 +83,7 @@ struct FileMeta {
 };
 
 struct SuperBlock {
-  FileMeta sb_meta[BLK_CNT];
+  FileMeta sb_meta[OBJ_CNT];
 };
 
 struct ctrlr_entry {
@@ -107,7 +107,7 @@ port::Mutex g_ns_mtx;
 
 int g_sectsize;
 int g_nsect;
-int g_sect_per_blk;
+int g_sect_per_obj;
 uint64_t g_dev_size;
 
 std::string g_dbname;
@@ -321,13 +321,13 @@ void init_spdk(void)
 
   g_sectsize = spdk_nvme_ns_get_sector_size(ns_ent->ns);
   g_nsect = spdk_nvme_ns_get_num_sectors(ns_ent->ns);
-  assert(BLK_SIZE % g_sectsize == 0);
-  g_sect_per_blk = BLK_SIZE / g_sectsize;
+  assert(OBJ_SIZE % g_sectsize == 0);
+  g_sect_per_obj = OBJ_SIZE / g_sectsize;
   g_dev_size = spdk_nvme_ns_get_size(ns_ent->ns);
 
   dprint("nvme sector size %d\n", g_sectsize);
   dprint("nvme ns sector count %d\n", g_nsect);
-  dprint("sectors per block %d\n", g_sect_per_blk);
+  dprint("sectors per block %d\n", g_sect_per_obj);
 }
 
 namespace {
@@ -635,7 +635,7 @@ class RawSequentialFile final : public SequentialFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
+    read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
                 ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -657,7 +657,7 @@ class RawSequentialFile final : public SequentialFile {
 
   Status Skip(uint64_t n) override {
     offset_ += n;
-    if (offset_ > BLK_SIZE)
+    if (offset_ > OBJ_SIZE)
       return PosixError(filename_, errno);
     return Status::OK();
   }
@@ -682,7 +682,7 @@ class RawRandomAccessFile final : public RandomAccessFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
+    read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
                 ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -732,7 +732,7 @@ class RawWritableFile final : public WritableFile {
       ns_ent->qpair_mtx.Lock();
       qpair = ns_ent->qpair;
     }
-    read_to_buf(ns, qpair, buf_, g_sect_per_blk * idx,
+    read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
                 ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -749,7 +749,7 @@ class RawWritableFile final : public WritableFile {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    assert(size_ + write_size <= BLK_SIZE);
+    assert(size_ + write_size <= OBJ_SIZE);
     memcpy(buf_ + size_, write_data, write_size);
 
     size_ += write_size;
@@ -781,7 +781,7 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
-    uint64_t lba = g_sect_per_blk * idx_ +
+    uint64_t lba = g_sect_per_obj * idx_ +
                    ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
     uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
 
@@ -881,7 +881,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewSequentialFile malloc failed\n");
@@ -920,7 +920,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewRandomAccessFile malloc failed\n");
@@ -980,14 +980,14 @@ class PosixEnv : public Env {
         strcpy(meta->f_name, basename.c_str());
         meta->f_name_len = basename.size();
         meta->f_size = 0;
-        meta->f_next_blk = 0;
+        meta->f_reserved = 0;
       } else {
         idx = g_file_table[basename];
       }
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewWritableFile malloc failed\n");
@@ -1033,14 +1033,14 @@ class PosixEnv : public Env {
         strcpy(meta->f_name, basename.c_str());
         meta->f_name_len = basename.size();
         meta->f_size = 0;
-        meta->f_next_blk = 0;
+        meta->f_reserved = 0;
       } else {
         idx = g_file_table[basename];
       }
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewAppendableFile malloc failed\n");
@@ -1122,7 +1122,7 @@ class PosixEnv : public Env {
 
       meta->f_size = 0;
       meta->f_name_len = 0;
-      meta->f_next_blk = 0;
+      meta->f_reserved = 0;
       meta->f_name[0] = '\0';
 
       msync(meta, META_SIZE, MS_SYNC);
@@ -1174,7 +1174,7 @@ class PosixEnv : public Env {
       FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
       if (sb_meta->sb_magic == LDBFS_MAGIC) {
         dprint("ldbfs found\n");
-        for (int i = 1; i < BLK_CNT; i++) {
+        for (int i = 1; i < OBJ_CNT; i++) {
           FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
           if (meta_ent->f_name_len == 0) {
             g_free_idx.push(i);
@@ -1186,7 +1186,7 @@ class PosixEnv : public Env {
         memset(g_sbbuf, 0, sizeof(SuperBlock));
         sb_meta->sb_magic = LDBFS_MAGIC;
 
-        for (int i = 1; i < BLK_CNT; i++) {
+        for (int i = 1; i < OBJ_CNT; i++) {
           g_free_idx.push(i);
         }
       }
