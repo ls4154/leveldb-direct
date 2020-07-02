@@ -60,6 +60,7 @@ namespace leveldb {
 
 #define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
 #define ROUND_DOWN(N, S) ((N) / (S) * (S))
+#define DIV_ROUND_UP(N, S) (((N) + (S) - 1) / (S))
 
 #define LDBFS_MAGIC (0xe51ab1541542020full)
 #define OBJ_SIZE (4ULL * 1024 * 1024)     // 4 MiB per object
@@ -67,6 +68,10 @@ namespace leveldb {
 #define OBJ_CNT (OBJ_SIZE / META_SIZE)    // maximum objs in LDBFS
 #define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
+
+#define READ_UNIT (4ULL * 1024 * 1024)             // Read granularity
+
+static_assert(OBJ_SIZE % READ_UNIT == 0, "");
 
 #define BUF_ALIGN (0x1000)
 
@@ -417,7 +422,7 @@ class PosixMmapReadableFile final : public RandomAccessFile {
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
-              char* scratch) const override {
+              char* scratch) override {
     if (offset + n > length_) {
       *result = Slice();
       return PosixError(filename_, EINVAL);
@@ -674,19 +679,9 @@ class RawRandomAccessFile final : public RandomAccessFile {
  public:
   RawRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
-        size_(g_sb_ptr->sb_meta[idx].f_size) {
-    struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_ns* ns = ns_ent->ns;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
-    read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
+        size_(g_sb_ptr->sb_meta[idx].f_size), bmap_(), last_bend_(-2), seq_cnt_(0),
+        prefetch_idx_(-1) {
+    v_compl_.reserve(OBJ_SIZE / READ_UNIT + 10); // to prevent memory address change
   }
 
   ~RawRandomAccessFile() override {
@@ -694,11 +689,89 @@ class RawRandomAccessFile final : public RandomAccessFile {
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
-              char* scratch) const override {
+              char* scratch) override {
     Status status;
     if (offset + n > size_) {
       *result = Slice();
       return PosixError(filename_, EINVAL);
+    }
+
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+
+    int bstart = offset / READ_UNIT;
+    int bend = (offset + n - 1) / READ_UNIT;
+    for (int i = bstart; i <= bend; i++) {
+      assert(i < OBJ_SIZE / READ_UNIT);
+      int bmap_idx = i / 8;
+      int bmap_shift = i % 8;
+      assert(bmap_idx < OBJ_SIZE / READ_UNIT);
+      if ((bmap_[bmap_idx] & (1 << (bmap_shift))) == 0) {
+        char* target_buf = buf_ + i * READ_UNIT;
+        uint64_t lba = g_sect_per_obj * idx_ + i * (READ_UNIT / g_sectsize);
+        uint32_t cnt = READ_UNIT / g_sectsize;
+        v_compl_.push_back(0);
+        read_to_buf(ns, qpair, target_buf, lba, cnt, &v_compl_.back());
+        bmap_[bmap_idx] |= (1 << (bmap_shift));
+      }
+    }
+
+    bool need_chk = false;
+    if (prefetch_idx_ >= 0) {
+      if (prefetch_idx_ >= bstart && prefetch_idx_ <= bend) {
+        assert(v_compl_.size() > 0);
+        need_chk = true;
+      } else if (v_compl_.size() > 1) {
+        need_chk = true;
+      }
+    } else {
+      if (v_compl_.size() > 0) {
+        need_chk = true;
+      }
+    }
+    if (need_chk) {
+      for (int i = 0; i < v_compl_.size(); i++) {
+        int *c = &v_compl_[i];
+        while (*c == 0)
+          check_completion(qpair);
+      }
+      v_compl_.clear();
+      prefetch_idx_ = -1;
+    }
+
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
+
+    if (bend == last_bend_) {
+      // do nothing
+    } else if (bend == last_bend_ + 1) {
+      last_bend_ = bend;
+      seq_cnt_++;
+    } else {
+      last_bend_ = bend;
+      seq_cnt_ = 0;
+    }
+
+    if (seq_cnt_ >= 4) { // prefetch threshold
+      int idx = bend + 1;
+      int bmap_idx = idx / 8;
+      int bmap_shift = idx % 8;
+      if (prefetch_idx_ < 0 && idx <= (size_ - 1) / READ_UNIT &&
+          (bmap_[bmap_idx] & (1 << (bmap_shift))) == 0) {
+        char* target_buf = buf_ + idx * READ_UNIT;
+        uint64_t lba = g_sect_per_obj * idx_ + idx * (READ_UNIT / g_sectsize);
+        uint32_t cnt = READ_UNIT / g_sectsize;
+        v_compl_.push_back(0);
+        read_to_buf(ns, qpair, target_buf, lba, cnt, &v_compl_.back());
+        bmap_[bmap_idx] |= (1 << (bmap_shift));
+        prefetch_idx_ = idx;
+      }
     }
 
     // memcpy(scratch, buf_ + offset, n);
@@ -713,6 +786,13 @@ class RawRandomAccessFile final : public RandomAccessFile {
   char* buf_;
   uint32_t size_;
   int idx_;
+
+  int last_bend_;
+  int seq_cnt_;
+  int prefetch_idx_; // pending prefetch if non negative
+  std::vector<int> v_compl_;
+
+  uint8_t bmap_[DIV_ROUND_UP(OBJ_SIZE / READ_UNIT, 8)];
 };
 
 class RawWritableFile final : public WritableFile {

@@ -239,7 +239,7 @@ class LEVELDB_EXPORT RandomAccessFile {
   //
   // Safe for concurrent use by multiple threads.
   virtual Status Read(uint64_t offset, size_t n, Slice* result,
-                      char* scratch) const = 0;
+                      char* scratch) = 0;
 };
 
 // A file abstraction for sequential writing.  The implementation
