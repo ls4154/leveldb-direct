@@ -63,13 +63,13 @@ namespace leveldb {
 #define DIV_ROUND_UP(N, S) (((N) + (S) - 1) / (S))
 
 #define LDBFS_MAGIC (0xe51ab1541542020full)
-#define OBJ_SIZE (4ULL * 1024 * 1024)     // 4 MiB per object
+#define OBJ_SIZE (4ULL * 1024 * 1024)       // 4 MiB per object
 #define META_SIZE (128)
-#define OBJ_CNT (OBJ_SIZE / META_SIZE)    // maximum objs in LDBFS
+#define OBJ_CNT (OBJ_SIZE / META_SIZE)      // maximum objs in LDBFS
 #define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
-#define READ_UNIT (4ULL * 1024 * 1024)             // Read granularity
+#define READ_UNIT (64ULL * 1024)            // Read granularity
 
 static_assert(OBJ_SIZE % READ_UNIT == 0, "");
 
