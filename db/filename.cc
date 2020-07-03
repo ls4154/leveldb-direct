@@ -35,7 +35,7 @@ static std::string MakeFileName2(const std::string& dbname, uint64_t number,
 
 std::string LogFileName(const std::string& dbname, uint64_t number) {
   assert(number > 0);
-  return MakeFileName(dbname, number, "log");
+  return MakeFileName2(dbname, number, "log");
 }
 
 std::string TableFileName(const std::string& dbname, uint64_t number) {
