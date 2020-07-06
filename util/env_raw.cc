@@ -830,7 +830,7 @@ class RawWritableFile final : public WritableFile {
  public:
   RawWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
       : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
-        size_(g_sb_ptr->sb_meta[idx].f_size), synced_(size_) {
+        size_(g_sb_ptr->sb_meta[idx].f_size), synced_(size_), compl_status_(0) {
     if (truncate) {
       size_ = 0;
       synced_ = 0;
@@ -916,6 +916,29 @@ class RawWritableFile final : public WritableFile {
     return Status::OK();
   }
 
+  Status AsyncSync() override {
+    assert(compaction_thd);
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
+    uint64_t lba = g_sect_per_obj * idx_ +
+                   ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
+    uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
+
+    write_from_buf(ns, qpair, target_buf, lba, cnt, &compl_status_);
+    return Status::OK();
+  }
+
+  bool CheckSync() override {
+    assert(compaction_thd);
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (compl_status_ == 0)
+      check_completion(qpair);
+    return compl_status_ > 0 ? true : false;
+  }
+
  private:
   const std::string filename_;
   char* buf_;
@@ -923,6 +946,7 @@ class RawWritableFile final : public WritableFile {
   uint32_t synced_;
   int idx_;
   bool closed_;
+  int compl_status_;
 };
 
 int LockOrUnlock(int fd, bool lock) {

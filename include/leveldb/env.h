@@ -258,6 +258,12 @@ class LEVELDB_EXPORT WritableFile {
   virtual Status Close() = 0;
   virtual Status Flush() = 0;
   virtual Status Sync() = 0;
+  virtual Status AsyncSync() {
+    return Status::NotSupported("AsyncSync");
+  }
+  virtual bool CheckSync() {
+    return false;
+  }
 };
 
 // An interface for writing log messages.
