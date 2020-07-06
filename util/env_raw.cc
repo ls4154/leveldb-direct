@@ -121,6 +121,10 @@ void* g_sbbuf;                            // guarded by g_fs_mtx
 SuperBlock* g_sb_ptr;                     // guarded by g_fs_mtx
 std::map<std::string, int> g_file_table;  // guarded by g_fs_mtx
 std::queue<int> g_free_idx;               // guarded by g_fs_mtx
+
+char* g_last_write_buf = nullptr;
+int g_last_write_idx = -1;
+
 port::Mutex g_fs_mtx;
 
 thread_local bool compaction_thd = false;
@@ -679,12 +683,41 @@ class RawRandomAccessFile final : public RandomAccessFile {
  public:
   RawRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
+        size_(g_sb_ptr->sb_meta[idx].f_size) {
+  }
+
+  ~RawRandomAccessFile() override {
+    spdk_free(buf_);
+  }
+
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch) override {
+    Status status;
+    if (offset + n > size_) {
+      *result = Slice();
+      return PosixError(filename_, EINVAL);
+    }
+    *result = Slice(buf_ + offset, n);
+    return status;
+  }
+
+ private:
+  const std::string filename_;
+  char* buf_;
+  uint32_t size_;
+  int idx_;
+};
+
+class RawPartialRandomAccessFile final : public RandomAccessFile {
+ public:
+  RawPartialRandomAccessFile(std::string filename, char* file_buf, int idx)
+      : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size), bmap_(), last_bend_(-2), seq_cnt_(0),
         prefetch_idx_(-1) {
     v_compl_.reserve(OBJ_SIZE / READ_UNIT + 10); // to prevent memory address change
   }
 
-  ~RawRandomAccessFile() override {
+  ~RawPartialRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -744,10 +777,6 @@ class RawRandomAccessFile final : public RandomAccessFile {
       prefetch_idx_ = -1;
     }
 
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
-
     if (bend == last_bend_) {
       // do nothing
     } else if (bend == last_bend_ + 1) {
@@ -774,8 +803,10 @@ class RawRandomAccessFile final : public RandomAccessFile {
       }
     }
 
-    // memcpy(scratch, buf_ + offset, n);
-    // *result = Slice(scratch, n);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
+
     *result = Slice(buf_ + offset, n);
 
     return status;
@@ -822,7 +853,17 @@ class RawWritableFile final : public WritableFile {
   ~RawWritableFile() override {
     if (!closed_)
       Close();
-    spdk_free(buf_);
+    if (filename_.rfind("ldb") != std::string::npos) {
+      g_fs_mtx.Lock();
+      if (g_last_write_buf != nullptr) {
+        spdk_free(g_last_write_buf);
+      }
+      g_last_write_buf = buf_;
+      g_last_write_idx = idx_;
+      g_fs_mtx.Unlock();
+    } else {
+      spdk_free(buf_);
+    }
   }
 
   Status Append(const Slice& data) override {
@@ -841,6 +882,8 @@ class RawWritableFile final : public WritableFile {
     FileMeta* meta = &g_sb_ptr->sb_meta[idx_];
     meta->f_size = size_;
     msync(meta, META_SIZE, MS_SYNC);
+
+    Sync();
 
     closed_ = true;
     return Status::OK();
@@ -948,35 +991,22 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
-      if (!g_file_table.count(basename)) {
-        g_fs_mtx.Unlock();
-        return PosixError(filename, ENOENT);
-      }
-      int idx = g_file_table[basename];
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
-
-      char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-      if (fbuf == NULL) {
-        fprintf(stderr, "NewSequentialFile malloc failed\n");
-        exit(1);
-      }
-      *result = new RawSequentialFile(basename, fbuf, idx);
-    } else {
-      int fd = ::open(filename.c_str(), O_RDONLY);
-      if (fd < 0) {
-        *result = nullptr;
-        return PosixError(filename, errno);
-      }
-      *result = new PosixSequentialFile(filename, fd);
-      return Status::OK();
+      return PosixError(filename, ENOENT);
     }
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewSequentialFile malloc failed\n");
+      exit(1);
+    }
+    *result = new RawSequentialFile(basename, fbuf, idx);
 
     return Status::OK();
   }
@@ -987,49 +1017,34 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
-      if (!g_file_table.count(basename)) {
-        g_fs_mtx.Unlock();
-        return PosixError(filename, ENOENT);
-      }
-      int idx = g_file_table[basename];
-      g_fs_mtx.Unlock();
+    char* fbuf = nullptr;
 
-      char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
+      return PosixError(filename, ENOENT);
+    }
+    int idx = g_file_table[basename];
+
+    if (g_last_write_idx == idx) {
+      fbuf = g_last_write_buf;
+      g_last_write_buf = nullptr;
+      g_last_write_idx = -1;
+    }
+
+    g_fs_mtx.Unlock();
+
+    if (fbuf != nullptr) {
+      *result = new RawRandomAccessFile(basename, fbuf, idx);
+    } else {
+      char* fbuf = static_cast<char*>(spdk_malloc(OBJ_SIZE, BUF_ALIGN,
+                                      static_cast<uint64_t*>(NULL),
+                                      SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewRandomAccessFile malloc failed\n");
         exit(1);
       }
-      *result = new RawRandomAccessFile(basename, fbuf, idx);
-    } else {
-      *result = nullptr;
-      int fd = ::open(filename.c_str(), O_RDONLY);
-      if (fd < 0) {
-        return PosixError(filename, errno);
-      }
-
-      uint64_t file_size;
-      Status status = GetFileSize(filename, &file_size);
-      if (status.ok()) {
-        void* mmap_base =
-            ::mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
-        if (mmap_base != MAP_FAILED) {
-          *result = new PosixMmapReadableFile(filename,
-                                              reinterpret_cast<char*>(mmap_base),
-                                              file_size);
-        } else {
-          status = PosixError(filename, errno);
-        }
-      }
-      ::close(fd);
-
-      return status;
+      *result = new RawPartialRandomAccessFile(basename, fbuf, idx);
     }
 
     return Status::OK();
@@ -1041,49 +1056,35 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
-      int idx;
-      if (!g_file_table.count(basename)) {
-        if (g_free_idx.empty()) {
-          fprintf(stderr, "out of blocks\n");
-          exit(1);
-        }
-        idx = g_free_idx.front();
-        g_free_idx.pop();
-        g_file_table.insert({basename, idx});
-
-        FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-        strcpy(meta->f_name, basename.c_str());
-        meta->f_name_len = basename.size();
-        meta->f_size = 0;
-        meta->f_reserved = 0;
-      } else {
-        idx = g_file_table[basename];
-      }
-      g_fs_mtx.Unlock();
-
-      char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-      if (fbuf == NULL) {
-        fprintf(stderr, "NewWritableFile malloc failed\n");
+    g_fs_mtx.Lock();
+    int idx;
+    if (!g_file_table.count(basename)) {
+      if (g_free_idx.empty()) {
+        fprintf(stderr, "out of blocks\n");
         exit(1);
       }
-      *result = new RawWritableFile(basename, fbuf, idx, true);
-    } else {
-      int fd = ::open(filename.c_str(), O_TRUNC | O_WRONLY | O_CREAT, 0644);
-      if (fd < 0) {
-        *result = nullptr;
-        return PosixError(filename, errno);
-      }
+      idx = g_free_idx.front();
+      g_free_idx.pop();
+      g_file_table.insert({basename, idx});
 
-      *result = new PosixWritableFile(filename, fd);
-      return Status::OK();
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+      strcpy(meta->f_name, basename.c_str());
+      meta->f_name_len = basename.size();
+      meta->f_size = 0;
+      meta->f_reserved = 0;
+    } else {
+      idx = g_file_table[basename];
     }
+    g_fs_mtx.Unlock();
+
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewWritableFile malloc failed\n");
+      exit(1);
+    }
+    *result = new RawWritableFile(basename, fbuf, idx, true);
 
     return Status::OK();
   }
@@ -1094,67 +1095,46 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
-      int idx;
-      if (!g_file_table.count(basename)) {
-        if (g_free_idx.empty()) {
-          fprintf(stderr, "out of blocks\n");
-          exit(1);
-        }
-        idx = g_free_idx.front();
-        g_free_idx.pop();
-        g_file_table.insert({basename, idx});
-
-        FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-        strcpy(meta->f_name, basename.c_str());
-        meta->f_name_len = basename.size();
-        meta->f_size = 0;
-        meta->f_reserved = 0;
-      } else {
-        idx = g_file_table[basename];
-      }
-      g_fs_mtx.Unlock();
-
-      char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-      if (fbuf == NULL) {
-        fprintf(stderr, "NewAppendableFile malloc failed\n");
+    g_fs_mtx.Lock();
+    int idx;
+    if (!g_file_table.count(basename)) {
+      if (g_free_idx.empty()) {
+        fprintf(stderr, "out of blocks\n");
         exit(1);
       }
-      *result = new RawWritableFile(basename, fbuf, idx, false);
-    } else {
-      int fd = ::open(filename.c_str(), O_APPEND | O_WRONLY | O_CREAT, 0644);
-      if (fd < 0) {
-        *result = nullptr;
-        return PosixError(filename, errno);
-      }
+      idx = g_free_idx.front();
+      g_free_idx.pop();
+      g_file_table.insert({basename, idx});
 
-      *result = new PosixWritableFile(filename, fd);
-      return Status::OK();
+      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+      strcpy(meta->f_name, basename.c_str());
+      meta->f_name_len = basename.size();
+      meta->f_size = 0;
+      meta->f_reserved = 0;
+    } else {
+      idx = g_file_table[basename];
     }
+    g_fs_mtx.Unlock();
+
+    char* fbuf = static_cast<char*>(
+                 spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    if (fbuf == NULL) {
+      fprintf(stderr, "NewAppendableFile malloc failed\n");
+      exit(1);
+    }
+    *result = new RawWritableFile(basename, fbuf, idx, false);
+
     return Status::OK();
   }
 
   bool FileExists(const std::string& filename) override {
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-
     bool ret;
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
-      ret = g_file_table.count(basename);
-      g_fs_mtx.Unlock();
-    } else {
-      return ::access(filename.c_str(), F_OK) == 0;
-    }
+    g_fs_mtx.Lock();
+    ret = g_file_table.count(basename);
+    g_fs_mtx.Unlock();
 
     return ret;
   }
@@ -1168,16 +1148,6 @@ class PosixEnv : public Env {
       result->emplace_back(it.first);
     g_fs_mtx.Unlock();
 
-    ::DIR* dir = ::opendir(directory_path.c_str());
-    if (dir == nullptr) {
-      return PosixError(directory_path, errno);
-    }
-    struct ::dirent* entry;
-    while ((entry = ::readdir(dir)) != nullptr) {
-      result->emplace_back(entry->d_name);
-    }
-    ::closedir(dir);
-
     return Status::OK();
   }
 
@@ -1186,54 +1156,42 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
+    g_fs_mtx.Lock();
 
-      if (!g_file_table.count(basename)) {
-        g_fs_mtx.Unlock();
-        return PosixError(filename, ENOENT);
-      }
-
-      int idx = g_file_table[basename];
-      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-
-      meta->f_size = 0;
-      meta->f_name_len = 0;
-      meta->f_reserved = 0;
-      meta->f_name[0] = '\0';
-
-      msync(meta, META_SIZE, MS_SYNC);
-
-      g_free_idx.push(idx);
-      g_file_table.erase(basename);
-
+    if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
-    } else {
-      if (::unlink(filename.c_str()) != 0) {
-        return PosixError(filename, errno);
-      }
-      return Status::OK();
+      return PosixError(filename, ENOENT);
     }
+
+    int idx = g_file_table[basename];
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+    meta->f_size = 0;
+    meta->f_name_len = 0;
+    meta->f_reserved = 0;
+    meta->f_name[0] = '\0';
+
+    msync(meta, META_SIZE, MS_SYNC);
+
+    if (g_last_write_idx == idx) {
+      spdk_free(g_last_write_buf);
+      g_last_write_idx = -1;
+      g_last_write_buf = nullptr;
+    }
+
+    g_free_idx.push(idx);
+    g_file_table.erase(basename);
+
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
 
   // initialize internal filesystem here
   Status CreateDir(const std::string& dirname) override {
-    if (::mkdir(dirname.c_str(), 0755) != 0) {
-      if (errno != EEXIST) {
-        perror("create dir\n");
-        exit(1);
-      }
-      //return PosixError(dirname, errno);
-    }
-
     if (g_dbname == "") {
       g_dbname = dirname;
-      int sb_fd = open((g_dbname + "/sb").c_str(), O_RDWR | O_CREAT, 0644);
+      int sb_fd = open((g_dbname + ".sb").c_str(), O_RDWR | O_CREAT, 0644);
       if (sb_fd == -1) {
         perror("open sb");
         exit(1);
@@ -1277,9 +1235,6 @@ class PosixEnv : public Env {
   }
 
   Status DeleteDir(const std::string& dirname) override {
-    if (::rmdir(dirname.c_str()) != 0) {
-      return PosixError(dirname, errno);
-    }
     return Status::OK();
   }
 
@@ -1288,32 +1243,19 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
-      if (!g_file_table.count(basename)) {
-        g_fs_mtx.Unlock();
-        return PosixError(filename, ENOENT);
-      }
-
-      int idx = g_file_table[basename];
-
-      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-
-      *size = meta->f_size;
-
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
       g_fs_mtx.Unlock();
-    } else {
-      struct ::stat file_stat;
-      if (::stat(filename.c_str(), &file_stat) != 0) {
-        *size = 0;
-        return PosixError(filename, errno);
-      }
-      *size = file_stat.st_size;
-      return Status::OK();
+      return PosixError(filename, ENOENT);
     }
+
+    int idx = g_file_table[basename];
+
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+    *size = meta->f_size;
+
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -1324,39 +1266,29 @@ class PosixEnv : public Env {
     std::string basename_from = Basename(from).ToString();
     std::string basename_to = Basename(to).ToString();
 
-    uint64_t fnum;
-    FileType ftype;
-    ParseFileName(basename_from, &fnum, &ftype);
-    if (ftype == kTableFile) {
-      g_fs_mtx.Lock();
+    g_fs_mtx.Lock();
 
-      if (!g_file_table.count(basename_from)) {
-        g_fs_mtx.Unlock();
-        return PosixError(from, ENOENT);
-      }
-
+    if (!g_file_table.count(basename_from)) {
       g_fs_mtx.Unlock();
-      DeleteFile(to); // ignore error
-      g_fs_mtx.Lock();
-
-      int idx = g_file_table[basename_from];
-      FileMeta* meta = &g_sb_ptr->sb_meta[idx];
-
-      meta->f_name_len = basename_to.size();
-      strcpy(meta->f_name, basename_to.c_str());
-
-      msync(meta, META_SIZE, MS_SYNC);
-
-      g_file_table[basename_to] = g_file_table[basename_from];
-      g_file_table.erase(basename_from);
-
-      g_fs_mtx.Unlock();
-    } else {
-      if (std::rename(from.c_str(), to.c_str()) != 0) {
-        return PosixError(from, errno);
-      }
-      return Status::OK();
+      return PosixError(from, ENOENT);
     }
+
+    g_fs_mtx.Unlock();
+    DeleteFile(to); // ignore error
+    g_fs_mtx.Lock();
+
+    int idx = g_file_table[basename_from];
+    FileMeta* meta = &g_sb_ptr->sb_meta[idx];
+
+    meta->f_name_len = basename_to.size();
+    strcpy(meta->f_name, basename_to.c_str());
+
+    msync(meta, META_SIZE, MS_SYNC);
+
+    g_file_table[basename_to] = g_file_table[basename_from];
+    g_file_table.erase(basename_from);
+
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
