@@ -39,9 +39,54 @@
 #include "util/env_posix_test_helper.h"
 #include "util/raw_logger.h"
 
-const char* ldbraw_dev_name = "/dev/sda1";
+#ifdef NDEBUG
+#define dprint(...) do { } while (0)
+#else
+#define dprint(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
+#endif
 
 namespace leveldb {
+
+#define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
+#define ROUND_DOWN(N, S) ((N) / (S) * (S))
+#define DIV_ROUND_UP(N, S) (((N) + (S) - 1) / (S))
+
+#define LDBFS_MAGIC (0xe51ab1541542020full)
+#define OBJ_SIZE (4ULL * 1024 * 1024)
+#define META_SIZE (128)
+#define OBJ_CNT (256)
+#define FS_SIZE (OBJ_SIZE * OBJ_CNT)
+#define MAX_NAMELEN (META_SIZE - 8)
+
+#define PAGESIZE (4096)
+
+struct FileMeta {
+  union {
+    struct {
+      uint32_t f_size;
+      uint16_t f_reserved;
+      uint8_t  f_name_len;
+    };
+    uint64_t   sb_magic;
+  };
+  char         f_name[MAX_NAMELEN];
+};
+static_assert(sizeof(FileMeta) == META_SIZE, "FileMeta size");
+
+struct SuperBlock {
+  FileMeta sb_meta[OBJ_CNT];
+};
+
+int g_dev_fd;
+uint64_t g_dev_size;
+void* g_mmap_base;
+std::string g_dbname = "";
+
+SuperBlock* g_sb_ptr;                    // guarded by g_fs_mtx
+std::map<std::string, int> g_file_table; // guarded by g_fs_mtx
+std::queue<int> g_free_idx;              // guarded by g_fs_mtx
+
+port::Mutex g_fs_mtx;
 
 namespace {
 
@@ -63,38 +108,6 @@ Status PosixError(const std::string& context, int error_number) {
     return Status::IOError(context, std::strerror(error_number));
   }
 }
-#define LDBFS_MAGIC 0x1234567890abcdefull
-#define BLK_SIZE (8ULL * 1024 * 1024)
-#define BLK_CNT (4096)
-#define FS_SIZE (BLK_SIZE * BLK_CNT)
-
-#define BLK_META_SIZE (8 * 4)
-#define MAX_NAMELEN (1024 - BLK_META_SIZE)
-#define MAX_PAYLOAD (BLK_SIZE - 1024)
-
-struct SuperBlock {
-    uint64_t sb_magic;
-    uint64_t sb_fcnt;
-    uint64_t sb_reserved0;
-    uint64_t sb_reserved1;
-};
-
-enum {
-    FTYPE_FREE = 0,
-    FTYPE_REG = 1,
-    FTYPE_DIR = 2,
-    FTYPE_LOCK = 3,
-    FTYPE_DATA = 4
-};
-
-struct RawFile {
-    uint64_t f_type;
-    uint64_t f_size;
-    uint64_t f_name_len;
-    uint64_t f_next_blk;
-    char f_name[MAX_NAMELEN];
-    char f_payload[];
-};
 
 Slice Basename(const std::string& filename) {
   std::string::size_type separator_pos = filename.rfind('/');
@@ -109,94 +122,80 @@ Slice Basename(const std::string& filename) {
       filename.length() - separator_pos - 1);
 }
 
-// Implements sequential read access in a file using read().
-//
-// Instances of this class are thread-friendly but not thread-safe, as required
-// by the SequentialFile API.
-class PosixSequentialFile final : public SequentialFile {
+class RawSequentialFile final : public SequentialFile {
  public:
-  PosixSequentialFile(std::string filename, RawFile *file_ptr)
-      : filename_(filename), file_ptr_(file_ptr), offset_(0) {
+  RawSequentialFile(std::string filename, char* file_buf, int size)
+      : filename_(filename), buf_(file_buf), offset_(0), size_(size) {
   }
-  ~PosixSequentialFile() override {}
+  ~RawSequentialFile() override {}
 
   Status Read(size_t n, Slice* result, char* scratch) override {
-    Status status;
-    n = std::min(n, file_ptr_->f_size - offset_);
-    //memcpy(scratch, file_ptr_->payload + offset_, n);
-    //*result = Slice(scratch, n);
-    *result = Slice(file_ptr_->f_payload + offset_, n);
+    n = std::min(n, (size_t)(size_ - offset_));
+    *result = Slice(buf_ + offset_, n);
     offset_ += n;
-    return status;
+    return Status::OK();
   }
 
   Status Skip(uint64_t n) override {
     offset_ += n;
-    if (offset_ > MAX_PAYLOAD)
+    if (offset_ > size_)
       return PosixError(filename_, errno);
     return Status::OK();
   }
 
  private:
   const std::string filename_;
-  RawFile *file_ptr_;
+  char* buf_;
+  uint32_t size_;
   off_t offset_;
 };
 
-// Implements random read access in a file using pread().
-//
-// Instances of this class are thread-safe, as required by the RandomAccessFile
-// API. Instances are immutable and Read() only calls thread-safe library
-// functions.
-class PosixRandomAccessFile final : public RandomAccessFile {
+class RawRandomAccessFile final : public RandomAccessFile {
  public:
-  // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
-  // instance, and will be used to determine if .
-  PosixRandomAccessFile(std::string filename, RawFile *file_ptr)
-      : filename_(std::move(filename)), file_ptr_(file_ptr) {
+  RawRandomAccessFile(std::string filename, char* file_buf, int size)
+      : filename_(std::move(filename)), buf_(file_buf), size_(size) {
   }
 
-  ~PosixRandomAccessFile() override {}
+  ~RawRandomAccessFile() override {}
 
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
-    Status status;
-    n = std::min(n, file_ptr_->f_size - offset);
-    //memcpy(scratch, file_ptr_->f_payload + offset, n);
-    //*result = Slice(scratch, n);
-    *result = Slice(file_ptr_->f_payload + offset, n);
-    return status;
+    if (offset + n > size_) {
+      *result = Slice();
+      return PosixError(filename_, EINVAL);
+    }
+    *result = Slice(buf_ + offset, n);
+    return Status::OK();
   }
 
  private:
   const std::string filename_;
-
-  RawFile *file_ptr_;
+  char* buf_;
+  uint32_t size_;
 };
 
-class PosixWritableFile final : public WritableFile {
+class RawWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, RawFile *file_ptr)
-      : pos_(0),
-        is_manifest_(IsManifest(filename)),
-        filename_(filename),
-        file_ptr_(file_ptr),
-        dirname_(Dirname(filename_)) {
-    offset_ = file_ptr->f_size;
+  RawWritableFile(std::string filename, char* file_buf, FileMeta* meta)
+      : filename_(std::move(filename)), buf_(file_buf), meta_(meta) {
+    size_ = meta->f_size;
   }
 
-  ~PosixWritableFile() override {
+  ~RawWritableFile() override {
+    meta_->f_size = size_;
   }
 
   Status Append(const Slice& data) override {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    assert(offset_ + write_size <= MAX_PAYLOAD);
-    memcpy(file_ptr_->f_payload + offset_, write_data, write_size);
+    if(size_ + write_size > OBJ_SIZE) {
+      fprintf(stderr, "write exceed 4M\n");
+      exit(1);
+    }
+    memcpy(buf_ + size_, write_data, write_size);
 
-    offset_ += write_size;
-    file_ptr_->f_size += write_size;
+    size_ += write_size;
 
     return Status::OK();
   }
@@ -210,65 +209,27 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status Sync() override {
-    msync(file_ptr_->f_payload, file_ptr_->f_size, MS_SYNC);
+    // TODO: sync dirty pages only
+    int rc = msync((void*)ROUND_DOWN((unsigned long)buf_, PAGESIZE),
+                   ROUND_UP(size_, PAGESIZE), MS_SYNC);
+    if (rc == -1) {
+      perror("msync data");
+      return PosixError(filename_, errno);
+    }
+    meta_->f_size = size_;
+    rc = msync((void*)ROUND_DOWN((unsigned long)meta_, PAGESIZE), PAGESIZE, MS_SYNC);
+    if (rc == -1) {
+      perror("msync meta");
+      return PosixError(filename_, errno);
+    }
     return Status::OK();
   }
 
  private:
-  // Ensures that all the caches associated with the given file descriptor's
-  // data are flushed all the way to durable media, and can withstand power
-  // failures.
-  //
-  // The path argument is only used to populate the description string in the
-  // returned Status if an error occurs.
-
-  // Returns the directory name in a path pointing to a file.
-  //
-  // Returns "." if the path does not contain any directory separator.
-  static std::string Dirname(const std::string& filename) {
-    std::string::size_type separator_pos = filename.rfind('/');
-    if (separator_pos == std::string::npos) {
-      return std::string(".");
-    }
-    // The filename component should not contain a path separator. If it does,
-    // the splitting was done incorrectly.
-    assert(filename.find('/', separator_pos + 1) == std::string::npos);
-
-    return filename.substr(0, separator_pos);
-  }
-
-  // Extracts the file name from a path pointing to a file.
-  //
-  // The returned Slice points to |filename|'s data buffer, so it is only valid
-  // while |filename| is alive and unchanged.
-  static Slice Basename(const std::string& filename) {
-    std::string::size_type separator_pos = filename.rfind('/');
-    if (separator_pos == std::string::npos) {
-      return Slice(filename);
-    }
-    // The filename component should not contain a path separator. If it does,
-    // the splitting was done incorrectly.
-    assert(filename.find('/', separator_pos + 1) == std::string::npos);
-
-    return Slice(filename.data() + separator_pos + 1,
-                 filename.length() - separator_pos - 1);
-  }
-
-  // True if the given file is a manifest file.
-  static bool IsManifest(const std::string& filename) {
-    return Basename(filename).starts_with("MANIFEST");
-  }
-
-  // buf_[0, pos_ - 1] contains data to be written to fd_.
-  char buf_[kWritableFileBufferSize];
-  size_t pos_;
-
-  const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
-  const std::string dirname_;  // The directory of filename_.
-
-  RawFile *file_ptr_;
-  off_t offset_;
+  char* buf_;
+  FileMeta* meta_;
+  uint32_t size_;
 };
 
 int LockOrUnlock(int fd, bool lock) {
@@ -296,32 +257,6 @@ class PosixFileLock : public FileLock {
   const std::string filename_;
 };
 
-// Tracks the files locked by PosixEnv::LockFile().
-//
-// We maintain a separate set instead of relying on fcntrl(F_SETLK) because
-// fcntl(F_SETLK) does not provide any protection against multiple uses from the
-// same process.
-//
-// Instances are thread-safe because all member data is guarded by a mutex.
-class PosixLockTable {
- public:
-  bool Insert(const std::string& fname) LOCKS_EXCLUDED(mu_) {
-    mu_.Lock();
-    bool succeeded = locked_files_.insert(fname).second;
-    mu_.Unlock();
-    return succeeded;
-  }
-  void Remove(const std::string& fname) LOCKS_EXCLUDED(mu_) {
-    mu_.Lock();
-    locked_files_.erase(fname);
-    mu_.Unlock();
-  }
-
- private:
-  port::Mutex mu_;
-  std::set<std::string> locked_files_ GUARDED_BY(mu_);
-};
-
 class PosixEnv : public Env {
  public:
   PosixEnv();
@@ -333,151 +268,207 @@ class PosixEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
-    struct RawFile *fptr;
-    fs_mutex_.Lock();
-    if (file_table_.count(filename)) {
-      fptr = GetFptr(file_table_[filename]);
-      fs_mutex_.Unlock();
-    } else {
-      fs_mutex_.Unlock();
-      return PosixError(filename, ENOENT);
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
+      return PosixError(basename, ENOENT);
     }
-    *result = new PosixSequentialFile(filename, fptr);
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+
+    char* fbuf = GetFileBuf(idx);
+    FileMeta* meta = GetFileMeta(idx);
+    *result = new RawSequentialFile(basename, fbuf, meta->f_size);
     return Status::OK();
   }
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
-    struct RawFile *fptr;
-    fs_mutex_.Lock();
-    if (file_table_.count(filename)) {
-      fptr = GetFptr(file_table_[filename]);
-      fs_mutex_.Unlock();
-    } else {
-      fs_mutex_.Unlock();
-      return PosixError(filename, ENOENT);
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
+      return PosixError(basename, ENOENT);
     }
-    *result = new PosixRandomAccessFile(filename, fptr);
+    int idx = g_file_table[basename];
+    g_fs_mtx.Unlock();
+
+    char* fbuf = GetFileBuf(idx);
+    FileMeta* meta = GetFileMeta(idx);
+    *result = new RawRandomAccessFile(basename, fbuf, meta->f_size);
     return Status::OK();
   }
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    struct RawFile *fptr;
-    fs_mutex_.Lock();
-    if (file_table_.count(filename)) {
-      fptr = GetFptr(file_table_[filename]);
-      fptr->f_size = 0; // delete if exists
+    std::string basename = Basename(filename).ToString();
+    int idx = -1;
+    char* fbuf = nullptr;
+    FileMeta* meta = nullptr;
+
+    g_fs_mtx.Lock();
+    if (g_file_table.count(basename)) {
+      idx = g_file_table[basename];
+      fbuf = GetFileBuf(idx);
+      meta = GetFileMeta(idx);
+      meta->f_size = 0; // truncate
     } else {
-      file_table_.insert({filename, free_idx_.front()});
-      free_idx_.pop();
-      fptr = GetFptr(file_table_[filename]);
-      strcpy(fptr->f_name, filename.c_str());
-      fptr->f_name_len = filename.size();
-      fptr->f_size = 0;
-      fptr->f_type = FTYPE_REG;
+      if (g_free_idx.empty()) {
+        fprintf(stderr, "out of space\n");
+        g_fs_mtx.Unlock();
+        return PosixError(basename, ENOSPC);
+      }
+      idx = g_free_idx.front();
+      g_free_idx.pop();
+      g_file_table.insert({basename, idx});
+      fbuf = GetFileBuf(idx);
+      meta = GetFileMeta(idx);
+      strcpy(meta->f_name, basename.c_str());
+      meta->f_name_len = basename.size();
+      meta->f_size = 0;
     }
-    fs_mutex_.Unlock();
-    *result = new PosixWritableFile(filename, fptr);
+    g_fs_mtx.Unlock();
+    *result = new RawWritableFile(basename, fbuf, meta);
     return Status::OK();
   }
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    struct RawFile *fptr;
-    fs_mutex_.Lock();
-    if (file_table_.count(filename)) {
-      fptr = GetFptr(file_table_[filename]);
+    std::string basename = Basename(filename).ToString();
+    int idx = -1;
+    char* fbuf = nullptr;
+    FileMeta* meta = nullptr;
+    g_fs_mtx.Lock();
+    if (g_file_table.count(basename)) {
+      idx = g_file_table[basename];
+      fbuf = GetFileBuf(idx);
+      meta = GetFileMeta(idx);
     } else {
-      file_table_.insert({filename, free_idx_.front()});
-      free_idx_.pop();
-      fptr = GetFptr(file_table_[filename]);
-      strcpy(fptr->f_name, filename.c_str());
-      fptr->f_name_len = filename.size();
-      fptr->f_size = 0;
-      fptr->f_type = FTYPE_REG;
+      if (g_free_idx.empty()) {
+        fprintf(stderr, "out of space\n");
+        g_fs_mtx.Unlock();
+        return PosixError(basename, ENOSPC);
+      }
+      idx = g_free_idx.front();
+      g_free_idx.pop();
+      g_file_table.insert({basename, idx});
+      fbuf = GetFileBuf(idx);
+      meta = GetFileMeta(idx);
+      strcpy(meta->f_name, basename.c_str());
+      meta->f_name_len = basename.size();
+      meta->f_size = 0;
     }
-    fs_mutex_.Unlock();
-    *result = new PosixWritableFile(filename, fptr);
+    g_fs_mtx.Unlock();
+    *result = new RawWritableFile(basename, fbuf, meta);
     return Status::OK();
   }
 
   bool FileExists(const std::string& filename) override {
-    return file_table_.count(filename);
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    bool ret = g_file_table.count(basename);
+    g_fs_mtx.Unlock();
+    return ret;
   }
 
   Status GetChildren(const std::string& directory_path,
                      std::vector<std::string>* result) override {
+    if (g_dbname == "") {
+      OpenLDBRaw(directory_path);
+    }
     result->clear();
 
-    fs_mutex_.Lock();
-    for (auto &it : file_table_)
-      result->emplace_back(Basename(it.first).ToString());
-    fs_mutex_.Unlock();
+    g_fs_mtx.Lock();
+    for (auto &it : g_file_table)
+      result->emplace_back(it.first);
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
 
   Status DeleteFile(const std::string& filename) override {
-    fs_mutex_.Lock();
-    if (!file_table_.count(filename)) {
-      fs_mutex_.Unlock();
-      return PosixError(filename, ENOENT);
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
+      return PosixError(basename, ENOENT);
     }
-    struct RawFile *fptr;
-    fptr = GetFptr(file_table_[filename]);
-    fptr->f_type = FTYPE_FREE;
-    free_idx_.push(file_table_[filename]);
-    file_table_.erase(filename);
-    fs_mutex_.Unlock();
+    int idx = g_file_table[basename];
+    FileMeta* meta = GetFileMeta(idx);
+    meta->f_name_len = 0;
+    meta->f_name[0] = '\0';
+    meta->f_size = 0;
+    g_file_table.erase(basename);
+    g_free_idx.push(idx);
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
 
   Status CreateDir(const std::string& dirname) override {
+    if (g_dbname != "") {
+      return Status::IOError("db already opened\n");
+    }
+    OpenLDBRaw(dirname);
     return Status::OK();
   }
 
   Status DeleteDir(const std::string& dirname) override {
+    FileMeta* super_meta = GetFileMeta(0);
+    super_meta->sb_magic = 0;
+    for (int i = 1; i < OBJ_CNT; i++) {
+      FileMeta* meta = GetFileMeta(i);
+      meta->f_name_len = 0;
+      meta->f_name[0] = '\0';
+      meta->f_size = 0;
+    }
+    g_file_table.clear();
+    while (!g_free_idx.empty()) {
+      g_free_idx.pop();
+    }
+    for (int i = 1; i < OBJ_CNT; i++) {
+      g_free_idx.push(i);
+    }
+    msync(super_meta, OBJ_SIZE, MS_SYNC);
     return Status::OK();
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
-    fs_mutex_.Lock();
-    if (!file_table_.count(filename)) {
-      fs_mutex_.Unlock();
-      return PosixError(filename, ENOENT);
+    std::string basename = Basename(filename).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename)) {
+      g_fs_mtx.Unlock();
+      return PosixError(basename, ENOENT);
     }
-    struct RawFile *fptr;
-    fptr = GetFptr(file_table_[filename]);
-    *size = fptr->f_size;
-    fs_mutex_.Unlock();
+    int idx = g_file_table[basename];
+    FileMeta* meta = GetFileMeta(idx);
+    *size = meta->f_size;
+    g_fs_mtx.Unlock();
     return Status::OK();
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
-    fs_mutex_.Lock();
-    if (!file_table_.count(from)) {
-      fs_mutex_.Unlock();
-      return PosixError(from, ENOENT);
+    std::string basename_from = Basename(from).ToString();
+    std::string basename_to = Basename(to).ToString();
+    g_fs_mtx.Lock();
+    if (!g_file_table.count(basename_from)) {
+      g_fs_mtx.Unlock();
+      return PosixError(basename_from, ENOENT);
     }
-    struct RawFile *fptr;
-    fptr = GetFptr(file_table_[from]);
+    int idx = g_file_table[basename_from];
+    FileMeta* meta = GetFileMeta(idx);
 
-    if (file_table_.count(to)) {
-      struct RawFile *fptr2;
-      fptr2 = GetFptr(file_table_[to]);
-      fptr2->f_type = FTYPE_FREE;
-      free_idx_.push(file_table_[to]);
-      file_table_.erase(to);
-    }
+    g_fs_mtx.Unlock();
+    DeleteFile(to); // may not exists, ignore error
+    g_fs_mtx.Lock();
 
-    file_table_[to] = file_table_[from];
-    file_table_.erase(from);
+    g_file_table.erase(basename_from);
+    g_file_table[basename_to] = idx;
 
-    strcpy(fptr->f_name, to.c_str());
-    fptr->f_name_len = to.size();
-    fs_mutex_.Unlock();
+    strcpy(meta->f_name, basename_to.c_str());
+    meta->f_name_len = basename_to.size();
+    g_fs_mtx.Unlock();
 
     return Status::OK();
   }
@@ -501,8 +492,7 @@ class PosixEnv : public Env {
                    void* thread_main_arg) override;
 
   Status GetTestDirectory(std::string* result) override {
-
-    return Status::OK();
+    return Status::NotSupported(__FUNCTION__);
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
@@ -541,10 +531,73 @@ class PosixEnv : public Env {
     void* const arg;
   };
 
+  FileMeta* GetFileMeta(int idx) {
+    return &g_sb_ptr->sb_meta[idx];
+  }
 
-  struct RawFile* GetFptr(int idx) {
-    return reinterpret_cast<struct RawFile*>(
-             static_cast<char*>(dev_mmap_base_) + BLK_SIZE * idx);
+  char* GetFileBuf(int idx) {
+    return static_cast<char*>(g_mmap_base) + OBJ_SIZE * idx;
+  }
+
+  void OpenLDBRaw(const std::string& dbname) {
+    bool real_dev = false;
+    g_dbname = dbname;
+    g_dev_size = FS_SIZE;
+    g_dev_fd = open(dbname.c_str(), O_RDWR | O_CREAT, 0644);
+    if (g_dev_fd == -1) {
+      perror("open ldb");
+      exit(1);
+    }
+    struct stat sts;
+    if (fstat(g_dev_fd, &sts) == -1) {
+      perror("fstat");
+      exit(1);
+    }
+    if ((sts.st_mode & S_IFMT) == S_IFREG) {
+      if (ftruncate(g_dev_fd, g_dev_size) == -1) {
+        perror("ftruncate");
+        exit(1);
+      }
+    } else if ((sts.st_mode & S_IFMT) == S_IFBLK) {
+      int nblk;
+      int sectsize;
+      ioctl(g_dev_fd, BLKGETSIZE, &nblk);
+      ioctl(g_dev_fd, BLKSSZGET, &sectsize);
+      real_dev = true;
+      if (1LL * sectsize * nblk < FS_SIZE) {
+        fprintf(stderr, "device too small\n");
+        exit(1);
+      }
+    } else {
+      fprintf(stderr, "unsupported file type\n");
+      exit(1);
+    }
+    g_mmap_base = mmap(nullptr, g_dev_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, g_dev_fd, 0);
+    if (g_mmap_base == MAP_FAILED) {
+      perror("mmap");
+      exit(1);
+    }
+    g_fs_mtx.Lock();
+    g_sb_ptr = static_cast<SuperBlock*>(g_mmap_base);
+    FileMeta* super_meta = GetFileMeta(0);
+    if (super_meta->sb_magic == LDBFS_MAGIC) {
+      for (int i = 1; i < OBJ_CNT; i++) {
+        FileMeta* meta = GetFileMeta(i);
+        if (meta->f_name_len > 0) {
+          g_file_table.insert({meta->f_name, i});
+        } else {
+          g_free_idx.push(i);
+        }
+      }
+    } else {
+      super_meta->sb_magic = LDBFS_MAGIC;
+      for (int i = 1; i < OBJ_CNT; i++) {
+        FileMeta* meta = GetFileMeta(i);
+        meta->f_name_len = 0;
+        meta->f_size = 0;
+      }
+    }
+    g_fs_mtx.Unlock();
   }
 
   port::Mutex background_work_mutex_;
@@ -553,16 +606,6 @@ class PosixEnv : public Env {
 
   std::queue<BackgroundWorkItem> background_work_queue_
       GUARDED_BY(background_work_mutex_);
-
-  PosixLockTable locks_;  // Thread-safe.
-
-  int dev_fd_;
-  uint64_t dev_size_;
-  void* dev_mmap_base_;
-  std::map<std::string, int> file_table_; // fs_mutex_
-  std::queue<int> free_idx_; // fs_mutex_
-  port::Mutex fs_mutex_;
-  struct SuperBlock *sb_ptr_;
 };
 
 }  // namespace
@@ -570,69 +613,6 @@ class PosixEnv : public Env {
 PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false) {
-  bool real_dev = false;
-  dev_size_ = FS_SIZE;
-  dev_fd_ = open(ldbraw_dev_name, O_RDWR | O_CREAT, 0644);
-  if (dev_fd_ == -1) {
-    perror("open ldb");
-    exit(1);
-  }
-  struct stat sts;
-  if (fstat(dev_fd_, &sts) == -1) {
-    perror("fstat");
-    exit(1);
-  }
-  if ((sts.st_mode & S_IFMT) == S_IFREG) {
-    if (ftruncate(dev_fd_, dev_size_) == -1) {
-      perror("ftruncate");
-      exit(1);
-    }
-  } else if ((sts.st_mode & S_IFMT) == S_IFBLK) {
-    int nblk;
-    int sectsize;
-    ioctl(dev_fd_, BLKGETSIZE, &nblk);
-    ioctl(dev_fd_, BLKSSZGET, &sectsize);
-    real_dev = true;
-    if (1ULL * sectsize * nblk < FS_SIZE) {
-      fprintf(stderr, "device too small\n");
-      exit(1);
-    }
-  } else {
-    fprintf(stderr, "wrong file type\n");
-    exit(1);
-  }
-  dev_mmap_base_ = mmap(nullptr, dev_size_, PROT_READ | PROT_WRITE, MAP_SHARED,
-                        dev_fd_, 0);
-  if (dev_mmap_base_ == MAP_FAILED) {
-    perror("mmap");
-    exit(1);
-  }
-  fs_mutex_.Lock();
-  sb_ptr_ = static_cast<struct SuperBlock*>(dev_mmap_base_);
-  if (sb_ptr_->sb_magic == LDBFS_MAGIC) {
-    for (int i = 1; i < BLK_CNT; i++) {
-      struct RawFile *fptr = GetFptr(i);
-      switch (fptr->f_type) {
-        case FTYPE_FREE:
-          free_idx_.push(i);
-          break;
-        case FTYPE_REG:
-          file_table_.insert({fptr->f_name, i});
-          break;
-        default:
-          printf("unknown file\n");
-          break;
-      }
-    }
-  } else {
-    for (int i = 1; i < BLK_CNT; i++) {
-      struct RawFile *fptr = GetFptr(i);
-      fptr->f_type = FTYPE_FREE;
-      free_idx_.push(i);
-    }
-    sb_ptr_->sb_magic = LDBFS_MAGIC;
-  }
-  fs_mutex_.Unlock();
 }
 
 void PosixEnv::Schedule(
