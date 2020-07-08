@@ -60,12 +60,12 @@ std::string TempFileName(const std::string& dbname, uint64_t number) {
 }
 
 std::string InfoLogFileName(const std::string& dbname) {
-  return dbname + "/LOG";
+  return dbname + ".LOG";
 }
 
 // Return the name of the old info log file for "dbname".
 std::string OldInfoLogFileName(const std::string& dbname) {
-  return dbname + "/LOG.old";
+  return dbname + ".LOG.old";
 }
 
 // Owned filenames have the form:

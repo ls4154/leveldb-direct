@@ -37,7 +37,7 @@
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "util/env_posix_test_helper.h"
-#include "util/raw_logger.h"
+#include "util/posix_logger.h"
 
 #ifdef NDEBUG
 #define dprint(...) do { } while (0)
@@ -210,18 +210,18 @@ class RawWritableFile final : public WritableFile {
 
   Status Sync() override {
     // TODO: sync dirty pages only
-    int rc = msync((void*)ROUND_DOWN((unsigned long)buf_, PAGESIZE),
-                   ROUND_UP(size_, PAGESIZE), MS_SYNC);
-    if (rc == -1) {
-      perror("msync data");
-      return PosixError(filename_, errno);
-    }
-    meta_->f_size = size_;
-    rc = msync((void*)ROUND_DOWN((unsigned long)meta_, PAGESIZE), PAGESIZE, MS_SYNC);
-    if (rc == -1) {
-      perror("msync meta");
-      return PosixError(filename_, errno);
-    }
+    // int rc = msync((void*)ROUND_DOWN((unsigned long)buf_, PAGESIZE),
+    //                ROUND_UP(size_, PAGESIZE), MS_SYNC);
+    // if (rc == -1) {
+    //   perror("msync data");
+    //   return PosixError(filename_, errno);
+    // }
+    // meta_->f_size = size_;
+    // rc = msync((void*)ROUND_DOWN((unsigned long)meta_, PAGESIZE), PAGESIZE, MS_SYNC);
+    // if (rc == -1) {
+    //   perror("msync meta");
+    //   return PosixError(filename_, errno);
+    // }
     return Status::OK();
   }
 
@@ -496,9 +496,14 @@ class PosixEnv : public Env {
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
-    std::FILE* fp = nullptr;
-    *result = new RawLogger(fp);
-    return Status::OK();
+    std::FILE* fp = std::fopen(filename.c_str(), "w");
+    if (fp == nullptr) {
+      *result = nullptr;
+      return PosixError(filename, errno);
+    } else {
+      *result = new PosixLogger(fp);
+      return Status::OK();
+    }
   }
 
   uint64_t NowMicros() override {
