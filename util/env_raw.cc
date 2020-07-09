@@ -79,7 +79,7 @@ struct SuperBlock {
 
 int g_dev_fd;
 uint64_t g_dev_size;
-void* g_mmap_base;
+void* g_mmap_base = nullptr;
 std::string g_dbname = "";
 
 SuperBlock* g_sb_ptr;                    // guarded by g_fs_mtx
@@ -210,18 +210,18 @@ class RawWritableFile final : public WritableFile {
 
   Status Sync() override {
     // TODO: sync dirty pages only
-    // int rc = msync((void*)ROUND_DOWN((unsigned long)buf_, PAGESIZE),
-    //                ROUND_UP(size_, PAGESIZE), MS_SYNC);
-    // if (rc == -1) {
-    //   perror("msync data");
-    //   return PosixError(filename_, errno);
-    // }
-    // meta_->f_size = size_;
-    // rc = msync((void*)ROUND_DOWN((unsigned long)meta_, PAGESIZE), PAGESIZE, MS_SYNC);
-    // if (rc == -1) {
-    //   perror("msync meta");
-    //   return PosixError(filename_, errno);
-    // }
+    int rc = msync((void*)ROUND_DOWN((unsigned long)buf_, PAGESIZE),
+                   ROUND_UP(size_, PAGESIZE), MS_SYNC);
+    if (rc == -1) {
+      perror("msync data");
+      return PosixError(filename_, errno);
+    }
+    meta_->f_size = size_;
+    rc = msync((void*)ROUND_DOWN((unsigned long)meta_, PAGESIZE), PAGESIZE, MS_SYNC);
+    if (rc == -1) {
+      perror("msync meta");
+      return PosixError(filename_, errno);
+    }
     return Status::OK();
   }
 
@@ -431,6 +431,8 @@ class PosixEnv : public Env {
       g_free_idx.push(i);
     }
     msync(super_meta, OBJ_SIZE, MS_SYNC);
+    g_dbname = "";
+    munmap(g_mmap_base, g_dev_size);
     return Status::OK();
   }
 
@@ -577,7 +579,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "unsupported file type\n");
       exit(1);
     }
-    g_mmap_base = mmap(nullptr, g_dev_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, g_dev_fd, 0);
+    g_mmap_base = mmap(nullptr, g_dev_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_dev_fd, 0);
     if (g_mmap_base == MAP_FAILED) {
       perror("mmap");
       exit(1);
