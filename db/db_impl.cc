@@ -835,13 +835,41 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   delete compact->builder;
   compact->builder = nullptr;
 
+#ifndef LDB_ASYNCFLUSH
+  // Finish and check for file errors
+  if (s.ok()) {
+    s = compact->outfile->Sync();
+  }
+  if (s.ok()) {
+    s = compact->outfile->Close();
+  }
+  delete compact->outfile;
+#else
   if (s.ok()) {
     s = compact->outfile->AsyncSync();
   }
   if (s.ok()) {
     compact->writable_files.push_back(compact->outfile);
   }
+#endif
+
   compact->outfile = nullptr;
+
+#ifndef LDB_ASYNCFLUSH
+  if (s.ok() && current_entries > 0) {
+    // Verify that the table is usable
+    Iterator* iter =
+        table_cache_->NewIterator(ReadOptions(), output_number, current_bytes);
+    s = iter->status();
+    delete iter;
+    if (s.ok()) {
+      Log(options_.info_log, "Generated table #%llu@%d: %lld keys, %lld bytes",
+          (unsigned long long)output_number, compact->compaction->level(),
+          (unsigned long long)current_entries,
+          (unsigned long long)current_bytes);
+    }
+  }
+#endif
   return s;
 }
 
@@ -998,6 +1026,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   delete input;
   input = nullptr;
 
+#ifdef LDB_ASYNCFLUSH
   for (int i = 0; i < compact->writable_files.size(); i++) {
     WritableFile* wfile = compact->writable_files[i];
     Status s;
@@ -1025,6 +1054,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
         (unsigned long long)0,
         (unsigned long long)current_bytes);
   }
+#endif
 
   CompactionStats stats;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
