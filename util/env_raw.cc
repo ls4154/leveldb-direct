@@ -70,6 +70,8 @@ namespace leveldb {
 #define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
+#define PAGESIZE (4096)
+
 #define READ_UNIT (64ULL * 1024)            // Read granularity
 
 static_assert(OBJ_SIZE % READ_UNIT == 0, "");
@@ -231,6 +233,16 @@ void read_complete(void *arg, const struct spdk_nvme_cpl *completion)
   }
 }
 
+void flush_complete(void *arg, const struct spdk_nvme_cpl *completion)
+{
+  int* compl_status = static_cast<int*>(arg);
+  *compl_status = 1;
+  if (spdk_nvme_cpl_is_error(completion)) {
+    fprintf(stderr, "spdk flush cpl error\n");
+    *compl_status = 2;
+  }
+}
+
 void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
                     void *buf, uint64_t lba, uint32_t cnt, int* chk_compl)
 {
@@ -285,6 +297,29 @@ void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
   rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &l_chk_cpl, 0);
   if (rc != 0) {
     fprintf(stderr, "spdk read failed\n");
+    exit(1);
+  }
+  while (!l_chk_cpl)
+    spdk_nvme_qpair_process_completions(qpair, 0);
+}
+
+void flush_to_dev(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair, int* chk_compl)
+{
+  int rc;
+
+  if (chk_compl != nullptr) {
+    rc = spdk_nvme_ns_cmd_flush(ns, qpair, flush_complete, chk_compl);
+    if (rc != 0) {
+      fprintf(stderr, "spdk flush failed\n");
+      exit(1);
+    }
+    return;
+  }
+
+  int l_chk_cpl = 0;
+  rc = spdk_nvme_ns_cmd_flush(ns, qpair, flush_complete, &l_chk_cpl);
+  if (rc != 0) {
+    fprintf(stderr, "spdk flush failed\n");
     exit(1);
   }
   while (!l_chk_cpl)
@@ -895,7 +930,8 @@ class RawWritableFile final : public WritableFile {
   Status Close() override {
     FileMeta* meta = &g_sb_ptr->sb_meta[idx_];
     meta->f_size = size_;
-    msync(meta, META_SIZE, MS_SYNC);
+    msync((void*)ROUND_DOWN((unsigned long)meta, PAGESIZE),
+          PAGESIZE, MS_SYNC);
 
     Sync();
 
@@ -922,7 +958,9 @@ class RawWritableFile final : public WritableFile {
                    ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
     uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
 
-    write_from_buf(ns, qpair, target_buf, lba, cnt, nullptr);
+    int dummy_cpl = 0;
+    write_from_buf(ns, qpair, target_buf, lba, cnt, &dummy_cpl);
+    flush_to_dev(ns, qpair, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -951,6 +989,15 @@ class RawWritableFile final : public WritableFile {
     if (compl_status_ == 0)
       check_completion(qpair);
     return compl_status_ > 0 ? true : false;
+  }
+
+  Status FlushSync() override {
+    assert(compaction_thd);
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    flush_to_dev(ns, qpair, nullptr);
+    return Status::OK();
   }
 
  private:
@@ -1209,7 +1256,8 @@ class PosixEnv : public Env {
     meta->f_reserved = 0;
     meta->f_name[0] = '\0';
 
-    msync(meta, META_SIZE, MS_SYNC);
+    msync((void*)ROUND_DOWN((unsigned long)meta, PAGESIZE),
+          PAGESIZE, MS_SYNC);
 
     if (g_last_write_idx == idx) {
       spdk_free(g_last_write_buf);
@@ -1335,7 +1383,8 @@ class PosixEnv : public Env {
     meta->f_name_len = basename_to.size();
     strcpy(meta->f_name, basename_to.c_str());
 
-    msync(meta, META_SIZE, MS_SYNC);
+    msync((void*)ROUND_DOWN((unsigned long)meta, PAGESIZE),
+          PAGESIZE, MS_SYNC);
 
     g_file_table[basename_to] = g_file_table[basename_from];
     g_file_table.erase(basename_from);

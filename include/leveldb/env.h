@@ -264,6 +264,9 @@ class LEVELDB_EXPORT WritableFile {
   virtual bool CheckSync() {
     return false;
   }
+  virtual Status FlushSync() {
+    return Status::NotSupported("FlushSync");
+  }
 };
 
 // An interface for writing log messages.
