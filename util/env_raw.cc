@@ -374,10 +374,10 @@ class PosixEnv : public Env {
 
   Status GetChildren(const std::string& directory_path,
                      std::vector<std::string>* result) override {
-    if (g_dbname == "") {
-      OpenLDBRaw(directory_path);
-    }
     result->clear();
+    if (g_dbname == "") {
+      return Status::OK();
+    }
 
     g_fs_mtx.Lock();
     for (auto &it : g_file_table)
@@ -415,24 +415,21 @@ class PosixEnv : public Env {
   }
 
   Status DeleteDir(const std::string& dirname) override {
-    FileMeta* super_meta = GetFileMeta(0);
-    super_meta->sb_magic = 0;
-    for (int i = 1; i < OBJ_CNT; i++) {
-      FileMeta* meta = GetFileMeta(i);
-      meta->f_name_len = 0;
-      meta->f_name[0] = '\0';
-      meta->f_size = 0;
+    if (unlink(dirname.c_str()) != 0) {
+      if (errno == ENOENT) {
+      } else {
+        perror("unlink");
+        exit(1);
+      }
     }
-    g_file_table.clear();
-    while (!g_free_idx.empty()) {
-      g_free_idx.pop();
+    if (g_dbname != "") {
+      g_dbname = "";
+      munmap(g_mmap_base, g_dev_size);
+      g_file_table.clear();
+      while (!g_free_idx.empty()) {
+        g_free_idx.pop();
+      }
     }
-    for (int i = 1; i < OBJ_CNT; i++) {
-      g_free_idx.push(i);
-    }
-    msync(super_meta, OBJ_SIZE, MS_SYNC);
-    g_dbname = "";
-    munmap(g_mmap_base, g_dev_size);
     return Status::OK();
   }
 
@@ -602,6 +599,7 @@ class PosixEnv : public Env {
         FileMeta* meta = GetFileMeta(i);
         meta->f_name_len = 0;
         meta->f_size = 0;
+        g_free_idx.push(i);
       }
     }
     g_fs_mtx.Unlock();
