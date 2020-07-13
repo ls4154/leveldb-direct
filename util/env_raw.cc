@@ -65,7 +65,8 @@ namespace leveldb {
 #define LDBFS_MAGIC (0xe51ab1541542020full)
 #define OBJ_SIZE (4ULL * 1024 * 1024)       // 4 MiB per object
 #define META_SIZE (128)
-#define OBJ_CNT (OBJ_SIZE / META_SIZE)      // maximum objs in LDBFS
+#define MAX_OBJ_CNT (OBJ_SIZE / META_SIZE)  // maximum objs in LDBFS
+#define OBJ_CNT (1024)
 #define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
@@ -86,6 +87,7 @@ struct FileMeta {
   };
   char         f_name[MAX_NAMELEN];
 };
+static_assert(sizeof(FileMeta) == META_SIZE, "FileMeta size");
 
 struct SuperBlock {
   FileMeta sb_meta[OBJ_CNT];
@@ -234,6 +236,12 @@ void write_from_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
 {
   int rc;
 
+  if (cnt == 0) {
+    if (chk_compl != nullptr)
+      *chk_compl = 1;
+    return;
+  }
+
   if (chk_compl != nullptr) {
     rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, chk_compl, 0);
     if (rc != 0) {
@@ -257,6 +265,12 @@ void read_to_buf(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
                  void *buf, uint64_t lba, uint32_t cnt, int* chk_compl)
 {
   int rc;
+
+  if (cnt == 0) {
+    if (chk_compl != nullptr)
+      *chk_compl = 1;
+    return;
+  }
 
   if (chk_compl != nullptr) {
     rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, chk_compl, 0);
@@ -1023,9 +1037,9 @@ class PosixEnv : public Env {
     int idx = g_file_table[basename];
     g_fs_mtx.Unlock();
 
-    char* fbuf = static_cast<char*>(
-                 spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+    char* fbuf = static_cast<char*>(spdk_malloc(OBJ_SIZE, BUF_ALIGN,
+                                    static_cast<uint64_t*>(NULL),
+                                    SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
     if (fbuf == NULL) {
       fprintf(stderr, "NewSequentialFile malloc failed\n");
       exit(1);
@@ -1259,6 +1273,20 @@ class PosixEnv : public Env {
   }
 
   Status DeleteDir(const std::string& dirname) override {
+    if (unlink((dirname + ".sb").c_str()) != 0) {
+      if (errno == ENOENT) {
+      } else {
+        perror("unlink");
+      }
+    }
+    if (g_dbname != "") {
+      g_dbname = "";
+      munmap(g_sbbuf, sizeof(SuperBlock));
+      g_file_table.clear();
+      while (!g_free_idx.empty()) {
+        g_free_idx.pop();
+      }
+    }
     return Status::OK();
   }
 
