@@ -930,8 +930,22 @@ class RawWritableFile final : public WritableFile {
   Status Close() override {
     FileMeta* meta = &g_sb_ptr->sb_meta[idx_];
     meta->f_size = size_;
-    msync((void*)ROUND_DOWN((unsigned long)meta, PAGESIZE),
-          PAGESIZE, MS_SYNC);
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    uint64_t offset = idx_ * META_SIZE;
+    char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
+    uint64_t lba = ROUND_DOWN(offset, g_sectsize) / g_sectsize;
+    int dummy_cpl = 0;
+    write_from_buf(ns, qpair, meta_buf, lba, 1, &dummy_cpl);
+    flush_to_dev(ns, qpair, nullptr);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
 
     Sync();
 
@@ -1256,8 +1270,19 @@ class PosixEnv : public Env {
     meta->f_reserved = 0;
     meta->f_name[0] = '\0';
 
-    msync((void*)ROUND_DOWN((unsigned long)meta, PAGESIZE),
-          PAGESIZE, MS_SYNC);
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    uint64_t offset = idx * META_SIZE; // in bytes
+    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, nullptr);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
 
     if (g_last_write_idx == idx) {
       spdk_free(g_last_write_buf);
@@ -1277,23 +1302,19 @@ class PosixEnv : public Env {
   Status CreateDir(const std::string& dirname) override {
     if (g_dbname == "") {
       g_dbname = dirname;
-      int sb_fd = open((g_dbname + ".sb").c_str(), O_RDWR | O_CREAT, 0644);
-      if (sb_fd == -1) {
-        perror("open sb");
+      g_sbbuf = spdk_zmalloc(OBJ_SIZE, BUF_ALIGN, nullptr,
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+      if (g_sbbuf == nullptr) {
+        fprintf(stderr, "spdk zmalloc failed\n");
         exit(1);
       }
-      if (ftruncate(sb_fd, sizeof(SuperBlock)) == -1) {
-        perror("ftruncate");
-        exit(1);
-      }
-      g_sbbuf = mmap(nullptr, sizeof(SuperBlock), PROT_READ | PROT_WRITE, MAP_SHARED, sb_fd, 0);
-      if (g_sbbuf == MAP_FAILED) {
-        perror("mmap");
-        exit(1);
-      }
-      close(sb_fd);
 
       g_fs_mtx.Lock();
+
+      struct ns_entry* ns_ent = g_namespaces;
+      struct spdk_nvme_ns* ns = ns_ent->ns;
+      struct spdk_nvme_qpair* qpair = ns_ent->qpair;
+      read_to_buf(ns, qpair, g_sbbuf, 0, g_sect_per_obj, nullptr);
       g_sb_ptr = reinterpret_cast<SuperBlock*>(g_sbbuf);
       FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
       if (sb_meta->sb_magic == LDBFS_MAGIC) {
@@ -1309,10 +1330,10 @@ class PosixEnv : public Env {
       } else {
         memset(g_sbbuf, 0, sizeof(SuperBlock));
         sb_meta->sb_magic = LDBFS_MAGIC;
-
         for (int i = 1; i < OBJ_CNT; i++) {
           g_free_idx.push(i);
         }
+        write_from_buf(ns, qpair, g_sbbuf, 0, g_sect_per_obj, nullptr);
       }
       g_fs_mtx.Unlock();
     }
@@ -1321,15 +1342,16 @@ class PosixEnv : public Env {
   }
 
   Status DeleteDir(const std::string& dirname) override {
-    if (unlink((dirname + ".sb").c_str()) != 0) {
-      if (errno == ENOENT) {
-      } else {
-        perror("unlink");
-      }
-    }
     if (g_dbname != "") {
+      struct ns_entry* ns_ent = g_namespaces;
+      struct spdk_nvme_ns* ns = ns_ent->ns;
+      struct spdk_nvme_qpair* qpair = ns_ent->qpair;
+      memset(g_sbbuf, 0, sizeof(SuperBlock));
+      write_from_buf(ns, qpair, g_sbbuf, 0, g_sect_per_obj, nullptr);
+
       g_dbname = "";
-      munmap(g_sbbuf, sizeof(SuperBlock));
+      spdk_free(g_sbbuf);
+      g_sbbuf = nullptr;
       g_file_table.clear();
       while (!g_free_idx.empty()) {
         g_free_idx.pop();
@@ -1383,8 +1405,19 @@ class PosixEnv : public Env {
     meta->f_name_len = basename_to.size();
     strcpy(meta->f_name, basename_to.c_str());
 
-    msync((void*)ROUND_DOWN((unsigned long)meta, PAGESIZE),
-          PAGESIZE, MS_SYNC);
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    uint64_t offset = idx * META_SIZE; // in bytes
+    void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
+    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, nullptr);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
 
     g_file_table[basename_to] = g_file_table[basename_from];
     g_file_table.erase(basename_from);
