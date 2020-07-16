@@ -126,8 +126,10 @@ SuperBlock* g_sb_ptr;                     // guarded by g_fs_mtx
 std::map<std::string, int> g_file_table;  // guarded by g_fs_mtx
 std::queue<int> g_free_idx;               // guarded by g_fs_mtx
 
+#if LDB_CACHELAST
 char* g_last_write_buf = nullptr;
 int g_last_write_idx = -1;
+#endif
 
 port::Mutex g_fs_mtx;
 
@@ -902,6 +904,7 @@ class RawWritableFile final : public WritableFile {
   ~RawWritableFile() override {
     if (!closed_)
       Close();
+#if LDB_CACHELAST
     if (filename_.rfind("ldb") != std::string::npos) {
       g_fs_mtx.Lock();
       if (g_last_write_buf != nullptr) {
@@ -910,9 +913,10 @@ class RawWritableFile final : public WritableFile {
       g_last_write_buf = buf_;
       g_last_write_idx = idx_;
       g_fs_mtx.Unlock();
-    } else {
-      spdk_free(buf_);
+      return;
     }
+#endif
+    spdk_free(buf_);
   }
 
   Status Append(const Slice& data) override {
@@ -1125,18 +1129,20 @@ class PosixEnv : public Env {
     }
     int idx = g_file_table[basename];
 
+#if LDB_CACHELAST
     if (g_last_write_idx == idx) {
       fbuf = g_last_write_buf;
       g_last_write_buf = nullptr;
       g_last_write_idx = -1;
     }
+#endif
 
     g_fs_mtx.Unlock();
 
     if (fbuf != nullptr) {
       *result = new RawRandomAccessFile(basename, fbuf, idx);
     } else {
-      char* fbuf = static_cast<char*>(spdk_malloc(OBJ_SIZE, BUF_ALIGN,
+      fbuf = static_cast<char*>(spdk_malloc(OBJ_SIZE, BUF_ALIGN,
                                       static_cast<uint64_t*>(NULL),
                                       SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
@@ -1284,11 +1290,13 @@ class PosixEnv : public Env {
       ns_ent->qpair_mtx.Unlock();
     }
 
+#if LDB_CACHELAST
     if (g_last_write_idx == idx) {
       spdk_free(g_last_write_buf);
       g_last_write_idx = -1;
       g_last_write_buf = nullptr;
     }
+#endif
 
     g_free_idx.push(idx);
     g_file_table.erase(basename);

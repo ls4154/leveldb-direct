@@ -87,7 +87,9 @@ struct DBImpl::CompactionState {
 
   uint64_t total_bytes;
 
+#if LDB_ASYNCFLUSH
   std::vector<WritableFile*> writable_files;
+#endif
 };
 
 // Fix user-supplied options to be reasonable
@@ -835,7 +837,7 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
   delete compact->builder;
   compact->builder = nullptr;
 
-#ifndef LDB_ASYNCFLUSH
+#if !(LDB_ASYNCFLUSH)
   // Finish and check for file errors
   if (s.ok()) {
     s = compact->outfile->Sync();
@@ -855,7 +857,7 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
 
   compact->outfile = nullptr;
 
-#ifndef LDB_ASYNCFLUSH
+#if !(LDB_ASYNCFLUSH)
   if (s.ok() && current_entries > 0) {
     // Verify that the table is usable
     Iterator* iter =
@@ -1026,7 +1028,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   delete input;
   input = nullptr;
 
-#ifdef LDB_ASYNCFLUSH
+#if LDB_ASYNCFLUSH
   compact->writable_files.back()->FlushSync();
   for (int i = 0; i < compact->writable_files.size(); i++) {
     WritableFile* wfile = compact->writable_files[i];
