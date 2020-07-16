@@ -25,6 +25,7 @@ class StdoutPrinter : public WritableFile {
 bool HandleDumpCommand(Env* env, char** files, int num) {
   StdoutPrinter printer;
   bool ok = true;
+  env->CreateDir("dummy");
   for (int i = 0; i < num; i++) {
     Status s = DumpFile(env, files[i], &printer);
     if (!s.ok()) {
