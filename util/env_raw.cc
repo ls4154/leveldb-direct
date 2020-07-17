@@ -140,7 +140,7 @@ bool g_vmd = false;
 bool probe_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
               struct spdk_nvme_ctrlr_opts* opts)
 {
-  printf("Attaching to %s\n", trid->traddr);
+  fprintf(stderr, "Attaching to %s\n", trid->traddr);
   return true;
 }
 
@@ -178,7 +178,7 @@ void attach_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
     exit(1);
   }
 
-  printf("Attachedto %s\n", trid->traddr);
+  fprintf(stderr, "Attachedto %s\n", trid->traddr);
   cdata = spdk_nvme_ctrlr_get_data(ctrlr);
 
   snprintf(entry->name, sizeof(entry->name), "%-20.20s (%-20.20s)", cdata->mn, cdata->sn);
@@ -187,7 +187,7 @@ void attach_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
   g_controllers = entry;
 
   num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
-  printf("Using controller %s with %d namespaces.\n", entry->name, num_ns);
+  fprintf(stderr, "Using controller %s with %d namespaces.\n", entry->name, num_ns);
   for (nsid = 1; nsid <= num_ns; nsid++) {
     ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
     if (ns == NULL)
@@ -1408,6 +1408,14 @@ class PosixEnv : public Env {
       while (!g_free_idx.empty()) {
         g_free_idx.pop();
       }
+    } else {
+      struct ns_entry* ns_ent = g_namespaces;
+      struct spdk_nvme_ns* ns = ns_ent->ns;
+      struct spdk_nvme_qpair* qpair = ns_ent->qpair;
+      g_sbbuf = spdk_zmalloc(OBJ_SIZE, BUF_ALIGN, nullptr,
+                             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+      write_from_buf(ns, qpair, g_sbbuf, 0, g_sect_per_obj, nullptr);
+      spdk_free(g_sbbuf);
     }
     return Status::OK();
   }

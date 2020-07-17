@@ -36,13 +36,30 @@ bool HandleDumpCommand(Env* env, char** files, int num) {
   return ok;
 }
 
+bool HandleLsCommand(Env* env) {
+  bool ok = true;
+  std::vector<std::string> files;
+  env->CreateDir("dummy");
+  env->GetChildren("dummy", &files);
+  for (std::string& f : files) {
+    printf("%s\n", f.c_str());
+  }
+  return ok;
+}
+bool HandleDestroyCommand(Env* env) {
+  env->DeleteDir("dummy");
+  return true;
+}
+
 }  // namespace
 }  // namespace leveldb
 
 static void Usage() {
   fprintf(stderr,
           "Usage: leveldbutil command...\n"
-          "   dump files...         -- dump contents of specified files\n");
+          "   dump files...         -- dump contents of specified files\n"
+          "   ls                    -- get file list\n"
+          "   destroy               -- destroy db\n");
 }
 
 int main(int argc, char** argv) {
@@ -55,6 +72,10 @@ int main(int argc, char** argv) {
     std::string command = argv[1];
     if (command == "dump") {
       ok = leveldb::HandleDumpCommand(env, argv + 2, argc - 2);
+    } else if (command == "ls") {
+      ok = leveldb::HandleLsCommand(env);
+    } else if (command == "destroy") {
+      ok = leveldb::HandleDestroyCommand(env);
     } else {
       Usage();
       ok = false;
