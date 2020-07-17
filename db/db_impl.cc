@@ -105,7 +105,7 @@ Options SanitizeOptions(const std::string& dbname,
   Options result = src;
   result.comparator = icmp;
   result.filter_policy = (src.filter_policy != nullptr) ? ipolicy : nullptr;
-  ClipToRange(&result.max_open_files, 64 + kNumNonTableCacheFiles, 50000);
+  ClipToRange(&result.max_open_files, 64 + kNumNonTableCacheFiles, 512);
   ClipToRange(&result.write_buffer_size, 64 << 10, 4000000);
   ClipToRange(&result.max_file_size, 1 << 20, 4000000);
   ClipToRange(&result.block_size, 1 << 10, 4 << 20);

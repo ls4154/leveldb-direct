@@ -66,7 +66,7 @@ namespace leveldb {
 #define OBJ_SIZE (4ULL * 1024 * 1024)       // 4 MiB per object
 #define META_SIZE (128)
 #define MAX_OBJ_CNT (OBJ_SIZE / META_SIZE)  // maximum objs in LDBFS
-#define OBJ_CNT (1024)
+#define OBJ_CNT (4096)
 #define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
@@ -696,7 +696,7 @@ class RawSequentialFile final : public SequentialFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
+                DIV_ROUND_UP(size_, g_sectsize), nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -708,9 +708,8 @@ class RawSequentialFile final : public SequentialFile {
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
     n = std::min(n, size_ - offset_);
-    // memcpy(scratch, buf_ + offset_, n);
-    // *result = Slice(scratch, n);
-    *result = Slice(buf_ + offset_, n);
+    memcpy(scratch, buf_ + offset_, n);
+    *result = Slice(scratch, n);
     offset_ += n;
     return status;
   }
@@ -735,9 +734,51 @@ class RawRandomAccessFile final : public RandomAccessFile {
   RawRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
+    struct ns_entry* ns_ent = g_namespaces;
+    struct spdk_nvme_ns* ns = ns_ent->ns;
+    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Lock();
+      qpair = ns_ent->qpair;
+    }
+    read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
+                DIV_ROUND_UP(size_, g_sectsize), nullptr);
+    if (!compaction_thd) {
+      ns_ent->qpair_mtx.Unlock();
+    }
   }
 
   ~RawRandomAccessFile() override {
+    spdk_free(buf_);
+  }
+
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch) override {
+    Status status;
+    if (offset + n > size_) {
+      *result = Slice();
+      return PosixError(filename_, EINVAL);
+    }
+    *result = Slice(buf_ + offset, n);
+    return status;
+  }
+
+ private:
+  const std::string filename_;
+  char* buf_;
+  uint32_t size_;
+  int idx_;
+};
+
+
+class RawNoLoadRandomAccessFile final : public RandomAccessFile {
+ public:
+  RawNoLoadRandomAccessFile(std::string filename, char* file_buf, int idx)
+      : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
+        size_(g_sb_ptr->sb_meta[idx].f_size) {
+  }
+
+  ~RawNoLoadRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -895,7 +936,7 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
-                ROUND_UP(size_, g_sectsize) / g_sectsize, nullptr);
+                DIV_ROUND_UP(size_, g_sectsize), nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -923,11 +964,12 @@ class RawWritableFile final : public WritableFile {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    assert(size_ + write_size <= OBJ_SIZE);
+    if (size_ + write_size > OBJ_SIZE) {
+      fprintf(stderr, "Writable File: exceed OBJ SIZE\n");
+      return Status::IOError("exceed OBJ SIZE");
+    }
     memcpy(buf_ + size_, write_data, write_size);
-
     size_ += write_size;
-
     return Status::OK();
   }
 
@@ -944,8 +986,7 @@ class RawWritableFile final : public WritableFile {
     uint64_t offset = idx_ * META_SIZE;
     char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
     uint64_t lba = ROUND_DOWN(offset, g_sectsize) / g_sectsize;
-    int dummy_cpl = 0;
-    write_from_buf(ns, qpair, meta_buf, lba, 1, &dummy_cpl);
+    write_from_buf(ns, qpair, meta_buf, lba, 1, nullptr);
     flush_to_dev(ns, qpair, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -976,8 +1017,7 @@ class RawWritableFile final : public WritableFile {
                    ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
     uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
 
-    int dummy_cpl = 0;
-    write_from_buf(ns, qpair, target_buf, lba, cnt, &dummy_cpl);
+    write_from_buf(ns, qpair, target_buf, lba, cnt, nullptr);
     flush_to_dev(ns, qpair, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
@@ -1140,7 +1180,7 @@ class PosixEnv : public Env {
     g_fs_mtx.Unlock();
 
     if (fbuf != nullptr) {
-      *result = new RawRandomAccessFile(basename, fbuf, idx);
+      *result = new RawNoLoadRandomAccessFile(basename, fbuf, idx);
     } else {
       fbuf = static_cast<char*>(spdk_malloc(OBJ_SIZE, BUF_ALIGN,
                                       static_cast<uint64_t*>(NULL),
@@ -1149,7 +1189,11 @@ class PosixEnv : public Env {
         fprintf(stderr, "NewRandomAccessFile malloc failed\n");
         exit(1);
       }
+#if LDB_PARTIALREAD
       *result = new RawPartialRandomAccessFile(basename, fbuf, idx);
+#else
+      *result = new RawRandomAccessFile(basename, fbuf, idx);
+#endif
     }
 
     return Status::OK();
