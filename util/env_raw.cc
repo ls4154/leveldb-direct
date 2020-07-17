@@ -985,9 +985,8 @@ class RawWritableFile final : public WritableFile {
     }
     uint64_t offset = idx_ * META_SIZE;
     char* meta_buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    uint64_t lba = ROUND_DOWN(offset, g_sectsize) / g_sectsize;
+    uint64_t lba = offset / g_sectsize;
     write_from_buf(ns, qpair, meta_buf, lba, 1, nullptr);
-    flush_to_dev(ns, qpair, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -1013,8 +1012,7 @@ class RawWritableFile final : public WritableFile {
       qpair = ns_ent->qpair;
     }
     char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
-    uint64_t lba = g_sect_per_obj * idx_ +
-                   synced_ / g_sectsize;
+    uint64_t lba = g_sect_per_obj * idx_ + synced_ / g_sectsize;
     uint32_t cnt = DIV_ROUND_UP(size_, g_sectsize) - synced_ / g_sectsize;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, nullptr);
@@ -1032,9 +1030,8 @@ class RawWritableFile final : public WritableFile {
     struct spdk_nvme_ns* ns = ns_ent->ns;
     struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
     char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
-    uint64_t lba = g_sect_per_obj * idx_ +
-                   ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
-    uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
+    uint64_t lba = g_sect_per_obj * idx_ + synced_ / g_sectsize;
+    uint32_t cnt = DIV_ROUND_UP(size_, g_sectsize) - synced_ / g_sectsize;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, &compl_status_);
     return Status::OK();
@@ -1329,7 +1326,7 @@ class PosixEnv : public Env {
     }
     uint64_t offset = idx * META_SIZE; // in bytes
     void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, nullptr);
+    write_from_buf(ns, qpair, buf, offset / g_sectsize, 1, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
@@ -1474,7 +1471,7 @@ class PosixEnv : public Env {
     }
     uint64_t offset = idx * META_SIZE; // in bytes
     void* buf = static_cast<char*>(g_sbbuf) + ROUND_DOWN(offset, g_sectsize);
-    write_from_buf(ns, qpair, buf, ROUND_DOWN(offset, g_sectsize) / g_sectsize, 1, nullptr);
+    write_from_buf(ns, qpair, buf, offset / g_sectsize, 1, nullptr);
     if (!compaction_thd) {
       ns_ent->qpair_mtx.Unlock();
     }
