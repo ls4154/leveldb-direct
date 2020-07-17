@@ -42,7 +42,9 @@ bool HandleLsCommand(Env* env) {
   env->CreateDir("dummy");
   env->GetChildren("dummy", &files);
   for (std::string& f : files) {
-    printf("%s\n", f.c_str());
+    uint64_t file_size;
+    env->GetFileSize(f, &file_size);
+    printf("%s: %lu\n", f.c_str(), file_size);
   }
   return ok;
 }
