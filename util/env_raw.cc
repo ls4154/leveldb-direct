@@ -1014,8 +1014,8 @@ class RawWritableFile final : public WritableFile {
     }
     char* target_buf = buf_ + ROUND_DOWN(synced_, g_sectsize);
     uint64_t lba = g_sect_per_obj * idx_ +
-                   ROUND_DOWN(synced_, g_sectsize) / g_sectsize;
-    uint32_t cnt = ROUND_UP(size_ - synced_, g_sectsize) / g_sectsize;
+                   synced_ / g_sectsize;
+    uint32_t cnt = DIV_ROUND_UP(size_, g_sectsize) - synced_ / g_sectsize;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, nullptr);
     flush_to_dev(ns, qpair, nullptr);
