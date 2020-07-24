@@ -410,10 +410,6 @@ Slice Basename(const std::string& filename) {
   if (separator_pos == std::string::npos) {
     return Slice(filename);
   }
-  // The filename component should not contain a path separator. If it does,
-  // the splitting was done incorrectly.
-  assert(filename.find('/', separator_pos + 1) == std::string::npos);
-
   return Slice(filename.data() + separator_pos + 1,
       filename.length() - separator_pos - 1);
 }
@@ -835,7 +831,6 @@ class RawPartialRandomAccessFile final : public RandomAccessFile {
       assert(i < OBJ_SIZE / READ_UNIT);
       int bmap_idx = i / 8;
       int bmap_shift = i % 8;
-      assert(bmap_idx < OBJ_SIZE / READ_UNIT);
       if ((bmap_[bmap_idx] & (1 << (bmap_shift))) == 0) {
         char* target_buf = buf_ + i * READ_UNIT;
         uint64_t lba = g_sect_per_obj * idx_ + i * (READ_UNIT / g_sectsize);
@@ -946,7 +941,8 @@ class RawWritableFile final : public WritableFile {
     if (!closed_)
       Close();
 #if LDB_CACHELAST
-    if (filename_.rfind("ldb") != std::string::npos) {
+    if (filename_[filename_.size() - 1] == 'b' &&
+        filename_[filename_.size() - 2] == 'd') {
       g_fs_mtx.Lock();
       if (g_last_write_buf != nullptr) {
         spdk_free(g_last_write_buf);
@@ -1566,6 +1562,10 @@ PosixEnv::PosixEnv()
   g_ns_mtx.Lock();
   init_spdk();
   g_ns_mtx.Unlock();
+
+#if LDB_UNAFFINITIZE
+  spdk_unaffinitize_thread();
+#endif
 }
 
 void PosixEnv::Schedule(

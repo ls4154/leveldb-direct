@@ -211,6 +211,7 @@ target_compile_definitions(leveldb
     LDB_ASYNCFLUSH=0
     LDB_CACHELAST=0
     LDB_PARTIALREAD=0
+    LDB_UNAFFINITIZE=0
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb
