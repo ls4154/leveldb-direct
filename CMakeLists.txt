@@ -18,7 +18,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_POSIX)
 
-option(LEVELDB_BUILD_TESTS "Build LevelDB's unit tests" ON)
+option(LEVELDB_BUILD_TESTS "Build LevelDB's unit tests" OFF)
 option(LEVELDB_BUILD_BENCHMARKS "Build LevelDB's benchmarks" ON)
 option(LEVELDB_INSTALL "Install LevelDB's header and library" ON)
 
@@ -81,12 +81,12 @@ configure_file(
 include_directories(
   "${PROJECT_BINARY_DIR}/include"
   "${PROJECT_SOURCE_DIR}"
-  "../spdk/include"
+  "$ENV{HOME}/spdk/include"
 )
 
 link_directories(
-  "../spdk/build/lib"
-  "../spdk/dpdk/build/lib"
+  "$ENV{HOME}/spdk/build/lib"
+  "$ENV{HOME}/spdk/dpdk/build/lib"
 )
 
 if(BUILD_SHARED_LIBS)
@@ -350,7 +350,16 @@ if(LEVELDB_BUILD_BENCHMARKS)
 
         "${bench_file}"
     )
-    target_link_libraries("${bench_target_name}" leveldb)
+    target_link_libraries("${bench_target_name}" leveldb
+      -Wl,-rpath,$ENV{HOME}/spdk/build/lib:$ENV{HOME}/spdk/dpdk/build/lib -L$ENV{HOME}/spdk/build/lib  -L$ENV{HOME}/spdk/dpdk/build/lib -pthread
+      -Wl,--whole-archive -Wl,--no-as-needed -lspdk_sock_posix -lspdk_nvme -lspdk_thread -lspdk_util -lspdk_log -lspdk_sock -lspdk_vmd -Wl,--no-whole-archive
+      $ENV{HOME}/spdk/build/lib/libspdk_env_dpdk.a
+      -Wl,--whole-archive,--no-as-needed $ENV{HOME}/spdk/dpdk/build/lib/librte_eal.a $ENV{HOME}/spdk/dpdk/build/lib/librte_mempool.a $ENV{HOME}/spdk/dpdk/build/lib/librte_ring.a
+      $ENV{HOME}/spdk/dpdk/build/lib/librte_mbuf.a $ENV{HOME}/spdk/dpdk/build/lib/librte_mempool_ring.a $ENV{HOME}/spdk/dpdk/build/lib/librte_pci.a
+      $ENV{HOME}/spdk/dpdk/build/lib/librte_bus_pci.a $ENV{HOME}/spdk/dpdk/build/lib/librte_kvargs.a $ENV{HOME}/spdk/dpdk/build/lib/librte_vhost.a
+      $ENV{HOME}/spdk/dpdk/build/lib/librte_net.a $ENV{HOME}/spdk/dpdk/build/lib/librte_cryptodev.a $ENV{HOME}/spdk/dpdk/build/lib/librte_hash.a -Wl,--no-whole-archive
+      -lnuma -ldl -L$ENV{HOME}/spdk/isa-l/.libs -lrt -luuid -lcrypto -laio
+    )
     target_compile_definitions("${bench_target_name}"
       PRIVATE
         ${LEVELDB_PLATFORM_NAME}=1
