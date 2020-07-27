@@ -42,13 +42,11 @@
 
 #include "db/filename.h"
 
-extern "C" {
 #include "spdk/stdinc.h"
 #include "spdk/ioat.h"
 #include "spdk/nvme.h"
 #include "spdk/string.h"
 #include "spdk/env.h"
-}
 
 #ifdef NDEBUG
 #define dprint(...) do { } while (0)
@@ -144,9 +142,6 @@ struct ns_entry {
   struct spdk_nvme_ctrlr* ctrlr;
   struct spdk_nvme_ns* ns;
   struct ns_entry* next;
-  port::Mutex qpair_mtx;
-  struct spdk_nvme_qpair* qpair;          // guarded by qpair_mtx
-  struct spdk_nvme_qpair* qpair_comp;     // for compaction thread
 };
 
 struct ctrlr_entry* g_controllers = NULL; // guarded by g_ns_mtx
@@ -161,7 +156,19 @@ port::Mutex g_fs_mtx;
 
 std::string g_dbname;
 
-thread_local bool compaction_thd = false;
+struct ThreadInfo {
+  bool compaction_thd;
+  struct spdk_nvme_qpair* qpair;
+  ThreadInfo() {
+    compaction_thd = false;
+    qpair = spdk_nvme_ctrlr_alloc_io_qpair(g_namespaces->ctrlr, NULL, 0);
+  }
+  ~ThreadInfo() {
+    spdk_nvme_ctrlr_free_io_qpair(qpair);
+  }
+};
+
+thread_local ThreadInfo tinfo;
 
 bool g_vmd = false;
 
@@ -422,20 +429,6 @@ void init_spdk(void)
   if (g_namespaces == NULL) {
     fprintf(stderr, "no namespaces found\n");
     cleanup();
-    exit(1);
-  }
-
-  struct ns_entry *ns_ent = g_namespaces;
-
-  ns_ent->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_ent->ctrlr, NULL, 0);
-  if (ns_ent->qpair == NULL) {
-    fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
-    exit(1);
-  }
-
-  ns_ent->qpair_comp = spdk_nvme_ctrlr_alloc_io_qpair(ns_ent->ctrlr, NULL, 0);
-  if (ns_ent->qpair_comp == NULL) {
-    fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed (compaction)\n");
     exit(1);
   }
 }
@@ -741,15 +734,8 @@ class ObjSequentialFile final : public SequentialFile {
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
+    struct spdk_nvme_qpair* qpair = tinfo.qpair;
     obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
   }
   ~ObjSequentialFile() override {
     spdk_free(buf_);
@@ -788,15 +774,8 @@ class ObjRandomAccessFile final : public RandomAccessFile {
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
+    struct spdk_nvme_qpair* qpair = tinfo.qpair;
     obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
   }
 
   ~ObjRandomAccessFile() override {
@@ -831,15 +810,8 @@ class ObjWritableFile final : public WritableFile {
     }
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
+    struct spdk_nvme_qpair* qpair = tinfo.qpair;
     obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
   }
 
   ~ObjWritableFile() override {
@@ -877,17 +849,9 @@ class ObjWritableFile final : public WritableFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_ns* ns = ns_ent->ns;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
+    struct spdk_nvme_qpair* qpair = tinfo.qpair;
     uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
-
     obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, nullptr);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
     return Status::OK();
   }
 
@@ -895,23 +859,15 @@ class ObjWritableFile final : public WritableFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_ns* ns = ns_ent->ns;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Lock();
-      qpair = ns_ent->qpair;
-    }
+    struct spdk_nvme_qpair* qpair = tinfo.qpair;
     uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
-
     obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, &compl_status_);
-    if (!compaction_thd) {
-      ns_ent->qpair_mtx.Unlock();
-    }
     return Status::OK();
   }
 
   bool CheckSync() override {
     struct ns_entry* ns_ent = g_namespaces;
-    struct spdk_nvme_qpair* qpair = ns_ent->qpair_comp;
+    struct spdk_nvme_qpair* qpair = tinfo.qpair;
     if (compl_status_ == 0)
       check_completion(qpair);
     return compl_status_ > 0 ? true : false;
@@ -1515,7 +1471,7 @@ void PosixEnv::Schedule(
 }
 
 void PosixEnv::BackgroundThreadMain() {
-  compaction_thd = true;
+  tinfo.compaction_thd = true;
   while (true) {
     background_work_mutex_.Lock();
 
