@@ -210,6 +210,7 @@ target_compile_definitions(leveldb
     LEVELDB_COMPILE_LIBRARY
     # Used by port/port.h.
     ${LEVELDB_PLATFORM_NAME}=1
+    LDB_UNAFFINITIZE=0
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb

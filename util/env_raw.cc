@@ -1447,6 +1447,10 @@ PosixEnv::PosixEnv()
   g_ns_mtx.Lock();
   init_spdk();
   g_ns_mtx.Unlock();
+
+#if LDB_UNAFFINITIZE
+  spdk_unaffinitize_thread();
+#endif
 }
 
 void PosixEnv::Schedule(
