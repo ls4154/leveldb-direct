@@ -62,14 +62,14 @@ namespace leveldb {
 #define ROUND_DOWN(N, S) ((N) / (S) * (S))
 
 #define LDBFS_MAGIC (0xe51ab1541542020full)
-#define BLK_SIZE (4ULL * 1024 * 1024)      // 4 MiB per block
+#define OBJ_SIZE (4ULL * 1024 * 1024)      // 4 MiB per object
 #define META_SIZE (128)
 #define MAX_NAMELEN (META_SIZE - 8)
-#define BLK_CNT (512)                      // maximum blocks in object storage
-#define FS_SIZE (BLK_SIZE * BLK_CNT)
+#define OBJ_CNT (512)                      // maximum objs in object storage
+#define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 
 #define SECT_SIZE (4ULL * 1024)
-#define SECT_PER_BLK (BLK_SIZE / SECT_SIZE)
+#define SECT_PER_OBJ (OBJ_SIZE / SECT_SIZE)
 
 #define BUF_ALIGN (0x1000)
 
@@ -122,7 +122,7 @@ struct FileMeta {
   union {
     struct {
       uint32_t f_size;
-      uint16_t f_next_blk;
+      uint16_t f_reserved;
       uint8_t  f_name_len;
     };
     uint64_t   sb_magic;
@@ -131,7 +131,7 @@ struct FileMeta {
 };
 
 struct SuperBlock {
-  FileMeta sb_meta[BLK_CNT];
+  FileMeta sb_meta[OBJ_CNT];
 };
 
 struct ctrlr_entry {
@@ -767,7 +767,7 @@ class ObjSequentialFile final : public SequentialFile {
 
   Status Skip(uint64_t n) override {
     offset_ += n;
-    if (offset_ > BLK_SIZE)
+    if (offset_ > OBJ_SIZE)
       return PosixError(filename_, errno);
     return Status::OK();
   }
@@ -852,7 +852,7 @@ class ObjWritableFile final : public WritableFile {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    assert(size_ + write_size <= BLK_SIZE);
+    assert(size_ + write_size <= OBJ_SIZE);
     memcpy(buf_ + size_, write_data, write_size);
 
     size_ += write_size;
@@ -1005,7 +1005,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-          spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+          spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewSequentialFile malloc failed\n");
@@ -1044,7 +1044,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewRandomAccessFile malloc failed\n");
@@ -1105,14 +1105,13 @@ class PosixEnv : public Env {
         strcpy(meta->f_name, basename.c_str());
         meta->f_name_len = basename.size();
         meta->f_size = 0;
-        meta->f_next_blk = 0;
       } else {
         idx = g_file_table[basename];
       }
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewWritableFile malloc failed\n");
@@ -1158,14 +1157,13 @@ class PosixEnv : public Env {
         strcpy(meta->f_name, basename.c_str());
         meta->f_name_len = basename.size();
         meta->f_size = 0;
-        meta->f_next_blk = 0;
       } else {
         idx = g_file_table[basename];
       }
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(BLK_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewAppendableFile malloc failed\n");
@@ -1248,7 +1246,6 @@ class PosixEnv : public Env {
 
       meta->f_size = 0;
       meta->f_name_len = 0;
-      meta->f_next_blk = 0;
       meta->f_name[0] = '\0';
 
       msync(meta, META_SIZE, MS_SYNC);
@@ -1300,7 +1297,7 @@ class PosixEnv : public Env {
       FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
       if (sb_meta->sb_magic == LDBFS_MAGIC) {
         dprint("ldbfs found\n");
-        for (int i = 1; i < BLK_CNT; i++) {
+        for (int i = 1; i < OBJ_CNT; i++) {
           FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
           if (meta_ent->f_name_len == 0) {
             g_free_idx.push(i);
@@ -1312,7 +1309,7 @@ class PosixEnv : public Env {
         memset(g_sbbuf, 0, sizeof(SuperBlock));
         sb_meta->sb_magic = LDBFS_MAGIC;
 
-        for (int i = 1; i < BLK_CNT; i++) {
+        for (int i = 1; i < OBJ_CNT; i++) {
           g_free_idx.push(i);
         }
       }
