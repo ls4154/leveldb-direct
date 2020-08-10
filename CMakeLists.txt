@@ -209,9 +209,10 @@ target_compile_definitions(leveldb
     # Used by port/port.h.
     ${LEVELDB_PLATFORM_NAME}=1
     LDB_ASYNCFLUSH=0
-    LDB_CACHELAST=0
+    LDB_CACHELAST=1
     LDB_PARTIALREAD=0
-    LDB_UNAFFINITIZE=0
+    LDB_UNAFFINITIZE=1
+    LDB_SPLITFS=0
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb
