@@ -213,6 +213,7 @@ target_compile_definitions(leveldb
     LDB_PARTIALREAD=0
     LDB_UNAFFINITIZE=1
     LDB_SPLITFS=0
+    LDB_SPLITFLUSH=0
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb

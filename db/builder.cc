@@ -76,4 +76,58 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
   return s;
 }
 
+Status BuildSingleTable(const std::string& dbname, Env* env, const Options& options,
+                  TableCache* table_cache, Iterator* iter, FileMetaData* meta,
+                  std::vector<WritableFile*>* wfs) {
+  Status s;
+  meta->file_size = 0;
+
+  std::string fname = TableFileName(dbname, meta->number);
+  if (iter->Valid()) {
+    WritableFile* file;
+    s = env->NewWritableFile(fname, &file);
+    if (!s.ok()) {
+      return s;
+    }
+    wfs->push_back(file);
+
+    TableBuilder* builder = new TableBuilder(options, file);
+    meta->smallest.DecodeFrom(iter->key());
+    for (; iter->Valid(); iter->Next()) {
+      Slice key = iter->key();
+      meta->largest.DecodeFrom(key);
+      builder->Add(key, iter->value());
+      if (builder->FileSize() >= options.max_file_size) {
+        iter->Next();
+        break;
+      }
+    }
+
+    // Finish and check for builder errors
+    s = builder->Finish();
+    if (s.ok()) {
+      meta->file_size = builder->FileSize();
+      assert(meta->file_size > 0);
+    }
+    delete builder;
+
+    // Finish and check for file errors
+    if (s.ok()) {
+      s = file->AsyncSync();
+    }
+  }
+
+  // Check for input iterator errors
+  if (!iter->status().ok()) {
+    s = iter->status();
+  }
+
+  if (s.ok() && meta->file_size > 0) {
+    // Keep it
+  } else {
+    env->DeleteFile(fname);
+  }
+  return s;
+}
+
 }  // namespace leveldb

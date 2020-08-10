@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#include <bits/stdint-uintn.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -975,6 +974,8 @@ class RawWritableFile final : public WritableFile {
 
   Status AsyncSync() override {
     assert(tinfo.compaction_thd);
+    if (synced_ == size_)
+      return Status::OK();
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ns* ns = ns_ent->ns;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
@@ -983,6 +984,7 @@ class RawWritableFile final : public WritableFile {
     uint32_t cnt = DIV_ROUND_UP(size_, g_sectsize) - synced_ / g_sectsize;
 
     write_from_buf(ns, qpair, target_buf, lba, cnt, &compl_status_);
+    synced_ = size_;
     return Status::OK();
   }
 
