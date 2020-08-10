@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <bits/stdint-uintn.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -1073,11 +1074,30 @@ class PosixEnv : public Env {
     std::abort();
   }
 
+  Status PosixNewSequentialFile(const std::string& filename,
+                           SequentialFile** result) {
+    int fd = open(filename.c_str(), O_RDONLY);
+    if (fd < 0) {
+      *result = nullptr;
+      return PosixError(filename, errno);
+    }
+    *result = new PosixSequentialFile(filename, fd);
+    return Status::OK();
+  }
+
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
     dprint("NewSequentialFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixNewSequentialFile(filename, result);
+    }
+#endif
 
     g_fs_mtx.Lock();
     if (!g_file_table.count(basename)) {
@@ -1099,11 +1119,44 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  Status PosixNewRandomAccessFile(const std::string& filename,
+                             RandomAccessFile** result) {
+    *result = nullptr;
+    int fd = open(filename.c_str(), O_RDONLY);
+    if (fd < 0) {
+      return PosixError(filename, errno);
+    }
+
+    uint64_t file_size;
+    Status status = GetFileSize(filename, &file_size);
+    if (status.ok()) {
+      void* mmap_base =
+          mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
+      if (mmap_base != MAP_FAILED) {
+        *result = new PosixMmapReadableFile(filename,
+                                            reinterpret_cast<char*>(mmap_base),
+                                            file_size);
+      } else {
+        status = PosixError(filename, errno);
+      }
+    }
+    close(fd);
+    return status;
+  }
+
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
     dprint("NewRandomAccessFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixNewRandomAccessFile(filename, result);
+    }
+#endif
 
     char* fbuf = nullptr;
 
@@ -1144,11 +1197,32 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  Status PosixNewWritableFile(const std::string& filename,
+                           WritableFile** result) {
+    int fd = open(filename.c_str(), O_TRUNC | O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+      *result = nullptr;
+      return PosixError(filename, errno);
+    }
+
+    *result = new PosixWritableFile(filename, fd);
+    return Status::OK();
+  }
+
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
     dprint("NewWritableFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixNewWritableFile(filename, result);
+    }
+#endif
 
     g_fs_mtx.Lock();
     int idx;
@@ -1183,11 +1257,32 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  Status PosixNewAppendableFile(const std::string& filename,
+                           WritableFile** result) {
+    int fd = open(filename.c_str(), O_APPEND | O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+      *result = nullptr;
+      return PosixError(filename, errno);
+    }
+
+    *result = new PosixWritableFile(filename, fd);
+    return Status::OK();
+  }
+
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
     dprint("NewAppendableFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixNewAppendableFile(filename, result);
+    }
+#endif
 
     g_fs_mtx.Lock();
     int idx;
@@ -1222,8 +1317,20 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  bool PosixFileExists(const std::string& filename) {
+    return access(filename.c_str(), F_OK) == 0;
+  }
+
   bool FileExists(const std::string& filename) override {
     std::string basename = Basename(filename).ToString();
+
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    if (ParseFileName(basename, &fnum, &ftype) && ftype != kTableFile) {
+      return PosixFileExists(filename);
+    }
+#endif
 
     bool ret;
     g_fs_mtx.Lock();
@@ -1237,6 +1344,18 @@ class PosixEnv : public Env {
                      std::vector<std::string>* result) override {
     result->clear();
 
+#if LDB_SPLITFS
+    DIR* dir = opendir(directory_path.c_str());
+    if (dir == nullptr) {
+      return PosixError(directory_path, errno);
+    }
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      result->emplace_back(entry->d_name);
+    }
+    closedir(dir);
+#endif
+
     g_fs_mtx.Lock();
     for (auto &it : g_file_table)
       result->emplace_back(it.first);
@@ -1245,10 +1364,26 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  Status PosixDeleteFile(const std::string& filename) {
+    if (unlink(filename.c_str()) != 0) {
+      return PosixError(filename, errno);
+    }
+    return Status::OK();
+  }
+
   Status DeleteFile(const std::string& filename) override {
     dprint("DeleteFile %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixDeleteFile(filename);
+    }
+#endif
 
     g_fs_mtx.Lock();
 
@@ -1290,6 +1425,11 @@ class PosixEnv : public Env {
 
   // initialize internal filesystem here
   Status CreateDir(const std::string& dirname) override {
+#if LDB_SPLITFS
+    if (mkdir(dirname.c_str(), 0755) != 0) {
+      return PosixError(dirname, errno);
+    }
+#endif
     if (g_dbname == "") {
       g_dbname = dirname;
       g_sbbuf = spdk_zmalloc(OBJ_SIZE, BUF_ALIGN, nullptr,
@@ -1332,6 +1472,11 @@ class PosixEnv : public Env {
   }
 
   Status DeleteDir(const std::string& dirname) override {
+#if LDB_SPLITFS
+    if (rmdir(dirname.c_str()) != 0) {
+      return PosixError(dirname, errno);
+    }
+#endif
     if (g_dbname != "") {
       struct ns_entry* ns_ent = g_namespaces;
       struct spdk_nvme_ns* ns = ns_ent->ns;
@@ -1358,10 +1503,28 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  Status PosixGetFileSize(const std::string& filename, uint64_t* size) {
+    struct stat file_stat;
+    if (stat(filename.c_str(), &file_stat) != 0) {
+      *size = 0;
+      return PosixError(filename, errno);
+    }
+    *size = file_stat.st_size;
+    return Status::OK();
+  }
+
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
     dprint("GetFileSize %s\n", filename.c_str());
 
     std::string basename = Basename(filename).ToString();
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixGetFileSize(filename, size);
+    }
+#endif
 
     g_fs_mtx.Lock();
     if (!g_file_table.count(basename)) {
@@ -1380,11 +1543,26 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  Status PosixRenameFile(const std::string& from, const std::string& to) {
+    if (rename(from.c_str(), to.c_str()) != 0) {
+      return PosixError(from, errno);
+    }
+    return Status::OK();
+  }
+
   Status RenameFile(const std::string& from, const std::string& to) override {
     dprint("RenameFile %s %s\n", from.c_str(), to.c_str());
 
     std::string basename_from = Basename(from).ToString();
     std::string basename_to = Basename(to).ToString();
+#if LDB_SPLITFS
+    uint64_t fnum;
+    FileType ftype;
+    ParseFileName(basename_from, &fnum, &ftype);
+    if (ftype != kTableFile) {
+      return PosixRenameFile(from, to);
+    }
+#endif
 
     g_fs_mtx.Lock();
 
