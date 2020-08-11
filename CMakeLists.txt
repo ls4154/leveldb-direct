@@ -189,8 +189,8 @@ target_sources(leveldb
 
 target_sources(leveldb
 PRIVATE
-  "${PROJECT_SOURCE_DIR}/util/env_raw.cc"
-  "${PROJECT_SOURCE_DIR}/util/raw_logger.h"
+  "${PROJECT_SOURCE_DIR}/util/env_direct.cc"
+  "${PROJECT_SOURCE_DIR}/util/posix_logger.h"
 )
 
 target_include_directories(leveldb

@@ -674,9 +674,9 @@ class PosixWritableFile final : public WritableFile {
   const std::string dirname_;  // The directory of filename_.
 };
 
-class RawSequentialFile final : public SequentialFile {
+class DirectSequentialFile final : public SequentialFile {
  public:
-  RawSequentialFile(std::string filename, char* file_buf, int idx)
+  DirectSequentialFile(std::string filename, char* file_buf, int idx)
       : filename_(filename), buf_(file_buf), offset_(0), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
@@ -685,7 +685,7 @@ class RawSequentialFile final : public SequentialFile {
     read_to_buf(ns, qpair, buf_, g_sect_per_obj * idx,
                 DIV_ROUND_UP(size_, g_sectsize), nullptr);
   }
-  ~RawSequentialFile() override {
+  ~DirectSequentialFile() override {
     spdk_free(buf_);
   }
 
@@ -713,9 +713,9 @@ class RawSequentialFile final : public SequentialFile {
   int idx_;
 };
 
-class RawRandomAccessFile final : public RandomAccessFile {
+class DirectRandomAccessFile final : public RandomAccessFile {
  public:
-  RawRandomAccessFile(std::string filename, char* file_buf, int idx)
+  DirectRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
     struct ns_entry* ns_ent = g_namespaces;
@@ -725,7 +725,7 @@ class RawRandomAccessFile final : public RandomAccessFile {
                 DIV_ROUND_UP(size_, g_sectsize), nullptr);
   }
 
-  ~RawRandomAccessFile() override {
+  ~DirectRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -748,14 +748,14 @@ class RawRandomAccessFile final : public RandomAccessFile {
 };
 
 
-class RawNoLoadRandomAccessFile final : public RandomAccessFile {
+class DirectNoLoadRandomAccessFile final : public RandomAccessFile {
  public:
-  RawNoLoadRandomAccessFile(std::string filename, char* file_buf, int idx)
+  DirectNoLoadRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size) {
   }
 
-  ~RawNoLoadRandomAccessFile() override {
+  ~DirectNoLoadRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -777,16 +777,16 @@ class RawNoLoadRandomAccessFile final : public RandomAccessFile {
   int idx_;
 };
 
-class RawPartialRandomAccessFile final : public RandomAccessFile {
+class DirectPartialRandomAccessFile final : public RandomAccessFile {
  public:
-  RawPartialRandomAccessFile(std::string filename, char* file_buf, int idx)
+  DirectPartialRandomAccessFile(std::string filename, char* file_buf, int idx)
       : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
         size_(g_sb_ptr->sb_meta[idx].f_size), bmap_(), last_bend_(-2), seq_cnt_(0),
         prefetch_idx_(-1) {
     v_compl_.reserve(OBJ_SIZE / READ_UNIT + 10); // to prevent memory address change
   }
 
-  ~RawPartialRandomAccessFile() override {
+  ~DirectPartialRandomAccessFile() override {
     spdk_free(buf_);
   }
 
@@ -886,9 +886,9 @@ class RawPartialRandomAccessFile final : public RandomAccessFile {
   uint8_t bmap_[DIV_ROUND_UP(OBJ_SIZE / READ_UNIT, 8)];
 };
 
-class RawWritableFile final : public WritableFile {
+class DirectWritableFile final : public WritableFile {
  public:
-  RawWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
+  DirectWritableFile(std::string filename, char* file_buf, int idx, bool truncate)
       : filename_(filename), buf_(file_buf), idx_(idx), closed_(false),
         size_(g_sb_ptr->sb_meta[idx].f_size), synced_(size_), compl_status_(0) {
     if (truncate) {
@@ -903,7 +903,7 @@ class RawWritableFile final : public WritableFile {
                 DIV_ROUND_UP(size_, g_sectsize), nullptr);
   }
 
-  ~RawWritableFile() override {
+  ~DirectWritableFile() override {
     if (!closed_)
       Close();
 #if LDB_CACHELAST
@@ -1116,7 +1116,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewSequentialFile malloc failed\n");
       exit(1);
     }
-    *result = new RawSequentialFile(basename, fbuf, idx);
+    *result = new DirectSequentialFile(basename, fbuf, idx);
 
     return Status::OK();
   }
@@ -1180,7 +1180,7 @@ class PosixEnv : public Env {
     g_fs_mtx.Unlock();
 
     if (fbuf != nullptr) {
-      *result = new RawNoLoadRandomAccessFile(basename, fbuf, idx);
+      *result = new DirectNoLoadRandomAccessFile(basename, fbuf, idx);
     } else {
       fbuf = static_cast<char*>(spdk_malloc(OBJ_SIZE, BUF_ALIGN,
                                       static_cast<uint64_t*>(NULL),
@@ -1190,9 +1190,9 @@ class PosixEnv : public Env {
         exit(1);
       }
 #if LDB_PARTIALREAD
-      *result = new RawPartialRandomAccessFile(basename, fbuf, idx);
+      *result = new DirectPartialRandomAccessFile(basename, fbuf, idx);
 #else
-      *result = new RawRandomAccessFile(basename, fbuf, idx);
+      *result = new DirectRandomAccessFile(basename, fbuf, idx);
 #endif
     }
 
@@ -1254,7 +1254,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewWritableFile malloc failed\n");
       exit(1);
     }
-    *result = new RawWritableFile(basename, fbuf, idx, true);
+    *result = new DirectWritableFile(basename, fbuf, idx, true);
 
     return Status::OK();
   }
@@ -1314,7 +1314,7 @@ class PosixEnv : public Env {
       fprintf(stderr, "NewAppendableFile malloc failed\n");
       exit(1);
     }
-    *result = new RawWritableFile(basename, fbuf, idx, false);
+    *result = new DirectWritableFile(basename, fbuf, idx, false);
 
     return Status::OK();
   }
