@@ -548,10 +548,12 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   }
 
   mutex_.Unlock();
-  wfs.back()->FlushSync();
   for (int i = 0; i < wfs.size(); i++) {
     WritableFile* wf = wfs[i];
     while (wf->CheckSync() == false);
+    if (i == wfs.size() - 1) {
+      wf->FlushSync();
+    }
     wf->Close();
     delete wf;
     Iterator* it = table_cache_->NewIterator(ReadOptions(), fnums[i], fsizes[i]);
