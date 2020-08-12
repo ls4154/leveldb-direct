@@ -1100,12 +1100,16 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   input = nullptr;
 
 #if LDB_ASYNCFLUSH
-  compact->writable_files.back()->FlushSync();
   for (int i = 0; i < compact->writable_files.size(); i++) {
     WritableFile* wfile = compact->writable_files[i];
     Status s;
 
-    // while (wfile->CheckSync() == false);
+    while (wfile->CheckSync() == false);
+
+    if (i == compact->writable_files.size() - 1) {
+      wfile->FlushSync();
+    }
+
     s = wfile->Close();
     if (!s.ok()) {
       fprintf(stderr, "close failed\n");
