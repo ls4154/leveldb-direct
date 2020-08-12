@@ -490,6 +490,71 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   return status;
 }
 
+#if LDB_SPLITFLUSH
+Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
+                                Version* base) {
+  mutex_.AssertHeld();
+  Iterator* iter = mem->NewIterator();
+
+  Status s;
+  FileMetaData meta;
+  CompactionStats stats;
+
+  iter->SeekToFirst();
+
+  std::vector<WritableFile*> wfs;
+  std::vector<uint64_t> fnums;
+  std::vector<uint64_t> fsizes;
+
+  while (iter->Valid()) {
+    const uint64_t start_micros = env_->NowMicros();
+    meta.number = versions_->NewFileNumber();
+    pending_outputs_.insert(meta.number);
+    Log(options_.info_log, "Level-0 table #%llu: started",
+        (unsigned long long)meta.number);
+    mutex_.Unlock();
+    s = BuildSingleTable(dbname_, env_, options_, table_cache_, iter, &meta, &wfs);
+    mutex_.Lock();
+    Log(options_.info_log, "Level-0 table #%llu: %lld bytes %s",
+        (unsigned long long)meta.number, (unsigned long long)meta.file_size,
+        s.ToString().c_str());
+    pending_outputs_.erase(meta.number);
+    fnums.push_back(meta.number);
+    fsizes.push_back(meta.file_size);
+
+    // Note that if file_size is zero, the file has been deleted and
+    // should not be added to the manifest.
+    int level = 0;
+    if (s.ok() && meta.file_size > 0) {
+      const Slice min_user_key = meta.smallest.user_key();
+      const Slice max_user_key = meta.largest.user_key();
+      if (base != nullptr) {
+        level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
+      }
+      edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
+                    meta.largest);
+    }
+    stats.micros = env_->NowMicros() - start_micros;
+    stats.bytes_written = meta.file_size;
+    stats_[level].Add(stats);
+  }
+
+  mutex_.Unlock();
+  for (int i = 0; i < wfs.size(); i++) {
+    WritableFile* wf = wfs[i];
+    while (wf->CheckSync() == false);
+    wf->Close();
+    delete wf;
+    Iterator* it = table_cache_->NewIterator(ReadOptions(), fnums[i], fsizes[i]);
+    s = it->status();
+    delete it;
+  }
+  mutex_.Lock();
+
+  delete iter;
+  return s;
+}
+#else
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
                                 Version* base) {
   mutex_.AssertHeld();
@@ -533,6 +598,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   stats_[level].Add(stats);
   return s;
 }
+#endif
 
 void DBImpl::CompactMemTable() {
   mutex_.AssertHeld();

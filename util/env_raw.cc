@@ -58,6 +58,7 @@ namespace leveldb {
 
 #define ROUND_UP(N, S) (((N) + (S) - 1) / (S) * (S))
 #define ROUND_DOWN(N, S) ((N) / (S) * (S))
+#define DIV_ROUND_UP(N, S) (((N) + (S) - 1) / (S))
 
 #define LDBFS_MAGIC (0xe51ab1541542020full)
 #define OBJ_SIZE (4ULL * 1024 * 1024)      // 4 MiB per object
@@ -148,13 +149,19 @@ struct ctrlr_entry* g_controllers = NULL; // guarded by g_ns_mtx
 struct ns_entry* g_namespaces = NULL;     // guarded by g_ns_mtx
 port::Mutex g_ns_mtx;
 
+std::string g_dbname;
+
 void* g_sbbuf;                            // guarded by g_fs_mtx
 SuperBlock* g_sb_ptr;                     // guarded by g_fs_mtx
 std::map<std::string, int> g_file_table;  // guarded by g_fs_mtx
 std::queue<int> g_free_idx;               // guarded by g_fs_mtx
-port::Mutex g_fs_mtx;
 
-std::string g_dbname;
+#if LDB_CACHELAST
+char* g_last_write_buf = nullptr;
+int g_last_write_idx = -1;
+#endif
+
+port::Mutex g_fs_mtx;
 
 struct ThreadInfo {
   bool compaction_thd;
@@ -175,7 +182,7 @@ bool g_vmd = false;
 bool probe_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
               struct spdk_nvme_ctrlr_opts* opts)
 {
-  printf("Attaching to %s\n", trid->traddr);
+  fprintf(stderr, "Attaching to %s\n", trid->traddr);
   return true;
 }
 
@@ -250,26 +257,6 @@ void cleanup(void)
   }
 }
 
-void write_complete(void* arg, const struct spdk_nvme_cpl* completion)
-{
-  int* compl_status = static_cast<int*>(arg);
-  *compl_status = 1;
-  if (spdk_nvme_cpl_is_error(completion)) {
-    fprintf(stderr, "spdk write cpl error\n");
-    *compl_status = 2;
-  }
-}
-
-void read_complete(void* arg, const struct spdk_nvme_cpl* completion)
-{
-  int* compl_status = static_cast<int*>(arg);
-  *compl_status = 1;
-  if (spdk_nvme_cpl_is_error(completion)) {
-    fprintf(stderr, "spdk read cpl error\n");
-    *compl_status = 2;
-  }
-}
-
 void obj_write_complete(void* arg, const struct spdk_nvme_cpl* completion)
 {
   int* compl_status = static_cast<int*>(arg);
@@ -288,38 +275,6 @@ void obj_read_complete(void* arg, const struct spdk_nvme_cpl* completion)
     fprintf(stderr, "spdk read cpl error\n");
     *compl_status = 2;
   }
-}
-
-void write_from_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
-                    void* buf, uint64_t lba, uint32_t cnt, bool chk_completion)
-{
-  int rc;
-  int cpl = 0;
-  rc = spdk_nvme_ns_cmd_write(ns, qpair, buf, lba, cnt, write_complete, &cpl, 0);
-  if (rc != 0) {
-    fprintf(stderr, "spdk write failed\n");
-    exit(1);
-  }
-  if (!chk_completion)
-    return;
-  while (!cpl)
-    spdk_nvme_qpair_process_completions(qpair, 0);
-}
-
-void read_to_buf(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
-                 void* buf, uint64_t lba, uint32_t cnt, bool chk_completion)
-{
-  int rc;
-  int cpl = 0;
-  rc = spdk_nvme_ns_cmd_read(ns, qpair, buf, lba, cnt, read_complete, &cpl, 0);
-  if (rc != 0) {
-    fprintf(stderr, "spdk read failed\n");
-    exit(1);
-  }
-  if (!chk_completion)
-    return;
-  while (!cpl)
-    spdk_nvme_qpair_process_completions(qpair, 0);
 }
 
 void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
@@ -453,10 +408,6 @@ Slice Basename(const std::string& filename) {
   if (separator_pos == std::string::npos) {
     return Slice(filename);
   }
-  // The filename component should not contain a path separator. If it does,
-  // the splitting was done incorrectly.
-  assert(filename.find('/', separator_pos + 1) == std::string::npos);
-
   return Slice(filename.data() + separator_pos + 1,
       filename.length() - separator_pos - 1);
 }
@@ -735,7 +686,7 @@ class ObjSequentialFile final : public SequentialFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, DIV_ROUND_UP(size_, SECT_SIZE), nullptr);
   }
   ~ObjSequentialFile() override {
     spdk_free(buf_);
@@ -744,9 +695,8 @@ class ObjSequentialFile final : public SequentialFile {
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
     n = std::min(n, size_ - offset_);
-    // memcpy(scratch, buf_ + offset_, n);
-    // *result = Slice(scratch, n);
-    *result = Slice(buf_ + offset_, n);
+    memcpy(scratch, buf_ + offset_, n);
+    *result = Slice(scratch, n);
     offset_ += n;
     return status;
   }
@@ -766,6 +716,32 @@ class ObjSequentialFile final : public SequentialFile {
   int idx_;
 };
 
+class ObjNoLoadRandomAccessFile final : public RandomAccessFile {
+ public:
+  ObjNoLoadRandomAccessFile(std::string filename, char* file_buf, int idx)
+      : filename_(std::move(filename)), buf_(file_buf), idx_(idx),
+        size_(g_sb_ptr->sb_meta[idx].f_size) {
+  }
+
+  ~ObjNoLoadRandomAccessFile() override {
+    spdk_free(buf_);
+  }
+
+  Status Read(uint64_t offset, size_t n, Slice* result,
+              char* scratch) const override {
+    Status status;
+    n = std::min(n, size_ - offset);
+    *result = Slice(buf_ + offset, n);
+    return status;
+  }
+
+ private:
+  const std::string filename_;
+  char* buf_;
+  uint32_t size_;
+  int idx_;
+};
+
 // Implements random read access in a file using SPDK io cmd.
 class ObjRandomAccessFile final : public RandomAccessFile {
  public:
@@ -775,7 +751,7 @@ class ObjRandomAccessFile final : public RandomAccessFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
+    obj_read_to_buf(ctrlr, qpair, buf_, idx_, DIV_ROUND_UP(size_, SECT_SIZE), nullptr);
   }
 
   ~ObjRandomAccessFile() override {
@@ -785,9 +761,10 @@ class ObjRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     Status status;
-    n = std::min(n, size_ - offset);
-    // memcpy(scratch, buf_ + offset, n);
-    // *result = Slice(scratch, n);
+    if (offset + n > size_) {
+      *result = Slice();
+      return PosixError(filename_, EINVAL);
+    }
     *result = Slice(buf_ + offset, n);
     return status;
   }
@@ -817,6 +794,19 @@ class ObjWritableFile final : public WritableFile {
   ~ObjWritableFile() override {
     if (!closed_)
       Close();
+#if LDB_CACHELAST
+    if (filename_[filename_.size() - 1] == 'b' &&
+        filename_[filename_.size() - 2] == 'd') {
+      g_fs_mtx.Lock();
+      if (g_last_write_buf != nullptr) {
+        spdk_free(g_last_write_buf);
+      }
+      g_last_write_buf = buf_;
+      g_last_write_idx = idx_;
+      g_fs_mtx.Unlock();
+      return;
+    }
+#endif
     spdk_free(buf_);
   }
 
@@ -824,11 +814,12 @@ class ObjWritableFile final : public WritableFile {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    assert(size_ + write_size <= OBJ_SIZE);
+    if (size_ + write_size > OBJ_SIZE) {
+      fprintf(stderr, "Writable File: exceed OBJ SIZE\n");
+      return Status::IOError("exceed OBJ SIZE");
+    }
     memcpy(buf_ + size_, write_data, write_size);
-
     size_ += write_size;
-
     return Status::OK();
   }
 
@@ -987,6 +978,7 @@ class PosixEnv : public Env {
 
     std::string basename = Basename(filename).ToString();
 
+    char* fbuf = nullptr;
     uint64_t fnum;
     FileType ftype;
     ParseFileName(basename, &fnum, &ftype);
@@ -997,16 +989,27 @@ class PosixEnv : public Env {
         return PosixError(filename, ENOENT);
       }
       int idx = g_file_table[basename];
+#if LDB_CACHELAST
+    if (g_last_write_idx == idx) {
+      fbuf = g_last_write_buf;
+      g_last_write_buf = nullptr;
+      g_last_write_idx = -1;
+    }
+#endif
       g_fs_mtx.Unlock();
 
-      char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
-                               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
-      if (fbuf == NULL) {
-        fprintf(stderr, "NewRandomAccessFile malloc failed\n");
-        exit(1);
+      if (fbuf != nullptr) {
+        *result = new ObjNoLoadRandomAccessFile(basename, fbuf, idx);
+      } else {
+        fbuf = static_cast<char*>(
+            spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+              SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
+        if (fbuf == NULL) {
+          fprintf(stderr, "NewRandomAccessFile malloc failed\n");
+          exit(1);
+        }
+        *result = new ObjRandomAccessFile(basename, fbuf, idx);
       }
-      *result = new ObjRandomAccessFile(basename, fbuf, idx);
     } else {
       // TODO: use posix mmap file
       *result = nullptr;
@@ -1205,6 +1208,14 @@ class PosixEnv : public Env {
       meta->f_name[0] = '\0';
 
       msync(meta, META_SIZE, MS_SYNC);
+
+#if LDB_CACHELAST
+    if (g_last_write_idx == idx) {
+      spdk_free(g_last_write_buf);
+      g_last_write_idx = -1;
+      g_last_write_buf = nullptr;
+    }
+#endif
 
       g_free_idx.push(idx);
       g_file_table.erase(basename);
