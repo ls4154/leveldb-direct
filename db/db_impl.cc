@@ -105,13 +105,26 @@ Options SanitizeOptions(const std::string& dbname,
   Options result = src;
   result.comparator = icmp;
   result.filter_policy = (src.filter_policy != nullptr) ? ipolicy : nullptr;
-  ClipToRange(&result.max_open_files, 64 + kNumNonTableCacheFiles, 512);
-#if LDB_SPLITFLUSH
-  ClipToRange(&result.write_buffer_size, 64 << 10, 1 << 30);
-#else
-  ClipToRange(&result.write_buffer_size, 64 << 10, 4000000);
+
+#ifndef LDB_MAX_OPEN_FILES
+#define LDB_MAX_OPEN_FILES 500
 #endif
-  ClipToRange(&result.max_file_size, 1 << 20, 4000000);
+
+  ClipToRange(&result.max_open_files, 64 + kNumNonTableCacheFiles, LDB_MAX_OPEN_FILES);
+
+#ifdef LDB_OBJ_SIZE_MB
+#define OBJ_SIZE (1ULL * LDB_OBJ_SIZE_MB * 1024 * 1024)
+#else
+#define OBJ_SIZE (4ULL * 1024 * 1024)
+#endif
+
+#if LDB_SPLITFLUSH
+  ClipToRange(&result.write_buffer_size, 64ULL << 10, 1ULL << 30);
+#else
+  ClipToRange(&result.write_buffer_size, 64ULL << 10, OBJ_SIZE * 125 / 100);
+#endif
+
+  ClipToRange(&result.max_file_size, 1ULL << 20, OBJ_SIZE * 96 / 100);
   ClipToRange(&result.block_size, 1 << 10, 4 << 20);
   if (result.info_log == nullptr) {
     // Open a log file in the same directory as the db
