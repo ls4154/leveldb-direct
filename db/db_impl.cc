@@ -271,7 +271,15 @@ void DBImpl::DeleteObsoleteFiles() {
         }
         Log(options_.info_log, "Delete type=%d #%lld\n", static_cast<int>(type),
             static_cast<unsigned long long>(number));
-        env_->DeleteFile(dbname_ + "/" + filenames[i]);
+        std::string filename;
+        if (type == kTableFile) {
+          filename = TableFileName(dbname_, number);
+        } else if (type == kLogFile) {
+          filename = LogFileName(dbname_, number);
+        } else {
+          filename = dbname_ + "/" + filenames[i];
+        }
+        env_->DeleteFile(filename);
       }
     }
   }
@@ -1534,7 +1542,15 @@ Status DestroyDB(const std::string& dbname, const Options& options) {
     for (size_t i = 0; i < filenames.size(); i++) {
       if (ParseFileName(filenames[i], &number, &type) &&
           type != kDBLockFile) {  // Lock file will be deleted at end
-        Status del = env->DeleteFile(dbname + "/" + filenames[i]);
+        std::string filename;
+        if (type == kTableFile) {
+          filename = TableFileName(dbname, number);
+        } else if (type == kLogFile) {
+          filename = LogFileName(dbname, number);
+        } else {
+          filename = dbname + "/" + filenames[i];
+        }
+        Status del = env->DeleteFile(filename);
         if (result.ok() && !del.ok()) {
           result = del;
         }

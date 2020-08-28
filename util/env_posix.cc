@@ -596,21 +596,27 @@ class PosixEnv : public Env {
   }
 
   Status CreateDir(const std::string& dirname) override {
+    bool create_error = false;
     if (::mkdir(dirname.c_str(), 0755) != 0) {
-      return PosixError(dirname, errno);
+      create_error = true;
     }
     std::string dirname2 = "/mnt/" + dirname;
     if (::mkdir(dirname2.c_str(), 0755) != 0) {
-      return PosixError(dirname2, errno);
+      create_error = true;
     }
-    return Status::OK();
+    return create_error ? PosixError(dirname, errno) : Status::OK();
   }
 
   Status DeleteDir(const std::string& dirname) override {
+    bool delete_error = false;
     if (::rmdir(dirname.c_str()) != 0) {
-      return PosixError(dirname, errno);
+      delete_error = true;
     }
-    return Status::OK();
+    std::string dirname2 = "/mnt/" + dirname;
+    if (::rmdir(dirname2.c_str()) != 0) {
+      delete_error = true;
+    }
+    return delete_error ? PosixError(dirname, errno) : Status::OK();
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
