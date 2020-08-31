@@ -80,6 +80,8 @@ namespace leveldb {
 #define OBJ_CNT (4096)
 #endif
 
+static_assert(OBJ_CNT <= MAX_OBJ_CNT, "");
+
 #define FS_SIZE (OBJ_SIZE * OBJ_CNT)
 #define MAX_NAMELEN (META_SIZE - 8)
 
@@ -163,6 +165,7 @@ bool probe_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
               struct spdk_nvme_ctrlr_opts* opts)
 {
   fprintf(stderr, "Attaching to %s\n", trid->traddr);
+  opts->io_queue_size = UINT16_MAX;
   return true;
 }
 
@@ -942,7 +945,7 @@ class DirectWritableFile final : public WritableFile {
     const char* write_data = data.data();
 
     if (size_ + write_size > OBJ_SIZE) {
-      fprintf(stderr, "Writable File: exceed OBJ SIZE\n");
+      fprintf(stderr, "Writable File %s: exceed OBJ SIZE\n", filename_.c_str());
       return Status::IOError("exceed OBJ SIZE");
     }
     memcpy(buf_ + size_, write_data, write_size);
@@ -1443,8 +1446,11 @@ class PosixEnv : public Env {
   // initialize internal filesystem here
   Status CreateDir(const std::string& dirname) override {
 #if LDB_SPLITFS
-    if (mkdir(dirname.c_str(), 0755) != 0) {
-      return PosixError(dirname, errno);
+    if (::mkdir(dirname.c_str(), 0755) != 0) {
+      if (errno != EEXIST) {
+        perror("create dir");
+        return PosixError(dirname, errno);
+      }
     }
 #endif
     if (g_dbname == "") {
@@ -1490,8 +1496,11 @@ class PosixEnv : public Env {
 
   Status DeleteDir(const std::string& dirname) override {
 #if LDB_SPLITFS
-    if (rmdir(dirname.c_str()) != 0) {
-      return PosixError(dirname, errno);
+    if (::rmdir(dirname.c_str()) != 0) {
+      if (errno != ENOENT) {
+        perror("delete dir");
+        return PosixError(dirname, errno);
+      }
     }
 #endif
     if (g_dbname != "") {
