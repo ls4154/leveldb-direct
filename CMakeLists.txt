@@ -225,6 +225,7 @@ target_compile_definitions(leveldb
     ${LEVELDB_PLATFORM_NAME}=1
     LDB_SPLIT_SSTABLE=1
     LDB_SPLIT_LOG=0
+    LDB_SPLITFLUSH=0
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb
