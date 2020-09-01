@@ -246,7 +246,8 @@ class PosixWritableFile final : public WritableFile {
         fd_(fd),
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
-        dirname_(Dirname(filename_)) {}
+        dirname_(Dirname(filename_)),
+        dirname2_("/mnt/" + dirname_) {}
 
   ~PosixWritableFile() override {
     if (fd_ >= 0) {
@@ -350,6 +351,13 @@ class PosixWritableFile final : public WritableFile {
       status = SyncFd(fd, dirname_);
       ::close(fd);
     }
+    fd = ::open(dirname2_.c_str(), O_RDONLY);
+    if (fd < 0) {
+      status = PosixError(dirname2_, errno);
+    } else {
+      status = SyncFd(fd, dirname2_);
+      ::close(fd);
+    }
     return status;
   }
 
@@ -427,6 +435,7 @@ class PosixWritableFile final : public WritableFile {
   const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
   const std::string dirname_;  // The directory of filename_.
+  const std::string dirname2_; // The directory of filename_.
 };
 
 int LockOrUnlock(int fd, bool lock) {
