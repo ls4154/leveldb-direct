@@ -94,6 +94,7 @@ namespace leveldb {
 #define SECT_PER_OBJ (OBJ_SIZE / SECT_SIZE)
 
 #define BUF_ALIGN (0x1000)
+#define PAGESIZE 4096
 
 #define SPDK_NVME_OPC_COSMOS_WRITE 0x81
 #define SPDK_NVME_OPC_COSMOS_READ  0x82
@@ -868,7 +869,10 @@ class ObjWritableFile final : public WritableFile {
   Status Close() override {
     FileMeta* meta = &g_sb_ptr->sb_meta[idx_];
     meta->f_size = size_;
-    msync(meta, META_SIZE, MS_SYNC);
+    int rc = msync((void*)ROUND_DOWN((uint64_t)meta, PAGESIZE), PAGESIZE, MS_SYNC);
+    if (rc == -1) {
+      perror("msync");
+    }
 
     closed_ = true;
     return Status::OK();
@@ -1268,7 +1272,10 @@ class PosixEnv : public Env {
       meta->f_name_len = 0;
       meta->f_name[0] = '\0';
 
-      msync(meta, META_SIZE, MS_SYNC);
+      int rc = msync((void*)ROUND_DOWN((uint64_t)meta, PAGESIZE), PAGESIZE, MS_SYNC);
+      if (rc == -1) {
+        perror("msync");
+      }
 
 #if LDB_CACHELAST
     if (g_last_write_idx == idx) {
@@ -1416,7 +1423,10 @@ class PosixEnv : public Env {
       meta->f_name_len = basename_to.size();
       strcpy(meta->f_name, basename_to.c_str());
 
-      msync(meta, META_SIZE, MS_SYNC);
+      int rc = msync((void*)ROUND_DOWN((uint64_t)meta, PAGESIZE), PAGESIZE, MS_SYNC);
+      if (rc == -1) {
+        perror("msync");
+      }
 
       g_file_table[basename_to] = g_file_table[basename_from];
       g_file_table.erase(basename_from);
