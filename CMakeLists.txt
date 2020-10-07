@@ -213,9 +213,10 @@ target_compile_definitions(leveldb
     LDB_UNAFFINITIZE=1
     LDB_CACHELAST=1
     LDB_SPLITFLUSH=1
-    #LDB_OBJ_SIZE_MB=32
-    #LDB_MAX_OPEN_FILES=1000
-    #LDB_OBJ_CNT=4096
+    LDB_OBJ_SIZE_MB=4
+    LDB_SST_SIZE_MB=4
+    LDB_MAX_OPEN_FILES=1000
+    LDB_OBJ_CNT=4096
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb

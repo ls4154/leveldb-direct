@@ -62,24 +62,32 @@ namespace leveldb {
 
 #define LDBFS_MAGIC (0xe51ab1541542020full)
 
-#ifdef LDB_OBJ_SIZE_MB
-#if LDB_OBJ_SIZE_MB < 4 || LDB_OBJ_SIZE_MB % 4 != 0
+#ifndef LDB_OBJ_SIZE_MB
+#define LDB_OBJ_SIZE_MB 4
+#endif
+
+#ifndef LDB_SST_SIZE_MB
+#define LDB_SST_SIZE_MB 4
+#endif
+
+#if LDB_SST_SIZE_MB < 0 || LDB_SST_SIZE_MB % LDB_OBJ_SIZE_MB != 0
 #error "invalid OBJ_SIZE"
 #endif
+
+#define OBJ_PER_SST (LDB_SST_SIZE_MB / LDB_OBJ_SIZE_MB)
 #define OBJ_SIZE (1ULL * LDB_OBJ_SIZE_MB * 1024 * 1024)
-#else
-#define OBJ_SIZE (4ULL * 1024 * 1024)       // 4 MiB per object
-#endif
+#define SST_SIZE (1ULL * LDB_SST_SIZE_MB * 1024 * 1024)
 
 #define META_SIZE (128)
 
 #ifdef LDB_OBJ_CNT
-#define OBJ_CNT (LDB_OBJ_CNT)
+#define MAX_OBJ_CNT (LDB_OBJ_CNT)
 #else
-#define OBJ_CNT (4096)
+#define MAX_OBJ_CNT (4096)
 #endif
 
-#define FS_SIZE (OBJ_SIZE * OBJ_CNT)
+#define MAX_SST_CNT (MAX_OBJ_CNT / OBJ_PER_SST)
+
 #define MAX_NAMELEN (META_SIZE - 8)
 
 #define SECT_SIZE (4ULL * 1024)
@@ -145,7 +153,7 @@ struct FileMeta {
 };
 
 struct SuperBlock {
-  FileMeta sb_meta[OBJ_CNT];
+  FileMeta sb_meta[MAX_SST_CNT];
 };
 
 struct ctrlr_entry {
@@ -275,20 +283,20 @@ void cleanup(void)
 void obj_write_complete(void* arg, const struct spdk_nvme_cpl* completion)
 {
   int* compl_status = static_cast<int*>(arg);
-  *compl_status = 1;
+  (*compl_status)++;
   if (spdk_nvme_cpl_is_error(completion)) {
     fprintf(stderr, "spdk write cpl error\n");
-    *compl_status = 2;
+    *compl_status = -1;
   }
 }
 
 void obj_read_complete(void* arg, const struct spdk_nvme_cpl* completion)
 {
   int* compl_status = static_cast<int*>(arg);
-  *compl_status = 1;
+  (*compl_status)++;
   if (spdk_nvme_cpl_is_error(completion)) {
     fprintf(stderr, "spdk read cpl error\n");
-    *compl_status = 2;
+    *compl_status = -1;
   }
 }
 
@@ -701,7 +709,14 @@ class ObjSequentialFile final : public SequentialFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, DIV_ROUND_UP(size_, SECT_SIZE), nullptr);
+
+    uint32_t left = size_;
+    for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+      char* target_buf = buf_ + i * OBJ_SIZE;
+      int target_idx = idx_ * OBJ_PER_SST + i;
+      int cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
+      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, cnt, nullptr);
+    }
   }
   ~ObjSequentialFile() override {
     spdk_free(buf_);
@@ -718,7 +733,7 @@ class ObjSequentialFile final : public SequentialFile {
 
   Status Skip(uint64_t n) override {
     offset_ += n;
-    if (offset_ > OBJ_SIZE)
+    if (offset_ > SST_SIZE)
       return PosixError(filename_, errno);
     return Status::OK();
   }
@@ -766,7 +781,13 @@ class ObjRandomAccessFile final : public RandomAccessFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, DIV_ROUND_UP(size_, SECT_SIZE), nullptr);
+    uint32_t left = size_;
+    for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+      char* target_buf = buf_ + i * OBJ_SIZE;
+      int target_idx = idx_ * OBJ_PER_SST + i;
+      int cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
+      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, cnt, nullptr);
+    }
   }
 
   ~ObjRandomAccessFile() override {
@@ -803,7 +824,13 @@ class ObjWritableFile final : public WritableFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    obj_read_to_buf(ctrlr, qpair, buf_, idx_, ROUND_UP(size_, SECT_SIZE) / SECT_SIZE, nullptr);
+    uint32_t left = size_;
+    for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+      char* target_buf = buf_ + i * OBJ_SIZE;
+      int target_idx = idx_ * OBJ_PER_SST + i;
+      int cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
+      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, cnt, nullptr);
+    }
   }
 
   ~ObjWritableFile() override {
@@ -829,9 +856,9 @@ class ObjWritableFile final : public WritableFile {
     size_t write_size = data.size();
     const char* write_data = data.data();
 
-    if (size_ + write_size > OBJ_SIZE) {
-      fprintf(stderr, "Writable File: exceed OBJ SIZE\n");
-      return Status::IOError("exceed OBJ SIZE");
+    if (size_ + write_size > SST_SIZE) {
+      fprintf(stderr, "Writable File: exceed SST size\n");
+      return Status::IOError("exceed SST size");
     }
     memcpy(buf_ + size_, write_data, write_size);
     size_ += write_size;
@@ -856,8 +883,19 @@ class ObjWritableFile final : public WritableFile {
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_ns* ns = ns_ent->ns;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
-    obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, nullptr);
+
+    uint32_t left = size_;
+    int i;
+    for (i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+      char* target_buf = buf_ + i * OBJ_SIZE;
+      int target_idx = idx_ * OBJ_PER_SST + i;
+      uint32_t cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
+      obj_write_from_buf(ctrlr, qpair, target_buf, target_idx, cnt, &compl_status_);
+    }
+    issued_writes_ = i;
+    while (compl_status_ < issued_writes_) {
+      check_completion(qpair);
+    }
     return Status::OK();
   }
 
@@ -866,17 +904,24 @@ class ObjWritableFile final : public WritableFile {
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_ns* ns = ns_ent->ns;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    uint32_t cnt = ROUND_UP(size_ , SECT_SIZE) / SECT_SIZE;
-    obj_write_from_buf(ctrlr, qpair, buf_, idx_, cnt, &compl_status_);
+
+    uint32_t left = size_;
+    int i;
+    for (i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+      char* target_buf = buf_ + i * OBJ_SIZE;
+      int target_idx = idx_ * OBJ_PER_SST + i;
+      uint32_t cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
+      obj_write_from_buf(ctrlr, qpair, target_buf, target_idx, cnt, &compl_status_);
+    }
+    issued_writes_ = i;
     return Status::OK();
   }
 
   bool CheckSync() override {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    if (compl_status_ == 0)
-      check_completion(qpair);
-    return compl_status_ > 0 ? true : false;
+    check_completion(qpair);
+    return compl_status_ >= issued_writes_;
   }
 
  private:
@@ -886,6 +931,7 @@ class ObjWritableFile final : public WritableFile {
   int idx_;
   bool closed_;
   int compl_status_;
+  int issued_writes_;
 };
 
 int LockOrUnlock(int fd, bool lock) {
@@ -967,7 +1013,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-          spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+          spdk_malloc(SST_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
             SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewSequentialFile malloc failed\n");
@@ -1017,7 +1063,7 @@ class PosixEnv : public Env {
         *result = new ObjNoLoadRandomAccessFile(basename, fbuf, idx);
       } else {
         fbuf = static_cast<char*>(
-            spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+            spdk_malloc(SST_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
               SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
         if (fbuf == NULL) {
           fprintf(stderr, "NewRandomAccessFile malloc failed\n");
@@ -1085,7 +1131,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(SST_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewWritableFile malloc failed\n");
@@ -1137,7 +1183,7 @@ class PosixEnv : public Env {
       g_fs_mtx.Unlock();
 
       char* fbuf = static_cast<char*>(
-                   spdk_malloc(OBJ_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
+                   spdk_malloc(SST_SIZE, BUF_ALIGN, static_cast<uint64_t*>(NULL),
                                SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA));
       if (fbuf == NULL) {
         fprintf(stderr, "NewAppendableFile malloc failed\n");
@@ -1279,7 +1325,7 @@ class PosixEnv : public Env {
       FileMeta* sb_meta = &g_sb_ptr->sb_meta[0];
       if (sb_meta->sb_magic == LDBFS_MAGIC) {
         dprint("ldbfs found\n");
-        for (int i = 1; i < OBJ_CNT; i++) {
+        for (int i = 1; i < MAX_SST_CNT; i++) {
           FileMeta* meta_ent = &g_sb_ptr->sb_meta[i];
           if (meta_ent->f_name_len == 0) {
             g_free_idx.push(i);
@@ -1291,7 +1337,7 @@ class PosixEnv : public Env {
         memset(g_sbbuf, 0, sizeof(SuperBlock));
         sb_meta->sb_magic = LDBFS_MAGIC;
 
-        for (int i = 1; i < OBJ_CNT; i++) {
+        for (int i = 1; i < MAX_SST_CNT; i++) {
           g_free_idx.push(i);
         }
       }
