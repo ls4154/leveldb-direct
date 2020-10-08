@@ -837,20 +837,6 @@ class ObjWritableFile final : public WritableFile {
   ~ObjWritableFile() override {
     if (!closed_)
       Close();
-#if LDB_CACHELAST
-    if (filename_[filename_.size() - 1] == 'b' &&
-        filename_[filename_.size() - 2] == 'd') {
-      g_fs_mtx.Lock();
-      if (g_last_write_buf != nullptr) {
-        spdk_free(g_last_write_buf);
-      }
-      g_last_write_buf = buf_;
-      g_last_write_idx = idx_;
-      g_fs_mtx.Unlock();
-      return;
-    }
-#endif
-    spdk_free(buf_);
   }
 
   Status Append(const Slice& data) override {
@@ -875,6 +861,22 @@ class ObjWritableFile final : public WritableFile {
     }
 
     closed_ = true;
+
+#if LDB_CACHELAST
+    if (filename_[filename_.size() - 1] == 'b' &&
+        filename_[filename_.size() - 2] == 'd') {
+      g_fs_mtx.Lock();
+      if (g_last_write_buf != nullptr) {
+        spdk_free(g_last_write_buf);
+      }
+      g_last_write_buf = buf_;
+      g_last_write_idx = idx_;
+      g_fs_mtx.Unlock();
+      return Status::OK();
+    }
+#endif
+    spdk_free(buf_);
+
     return Status::OK();
   }
 
@@ -924,7 +926,9 @@ class ObjWritableFile final : public WritableFile {
   bool CheckSync() override {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-    check_completion(qpair);
+    if (compl_status_ < issued_writes_) {
+      check_completion(qpair);
+    }
     return compl_status_ >= issued_writes_;
   }
 

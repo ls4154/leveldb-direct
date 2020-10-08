@@ -217,6 +217,7 @@ target_compile_definitions(leveldb
     LDB_SST_SIZE_MB=4
     LDB_MAX_OPEN_FILES=1000
     LDB_OBJ_CNT=4096
+    LDB_DELAYED_SYNC=8
 )
 if (NOT HAVE_CXX17_HAS_INCLUDE)
   target_compile_definitions(leveldb

@@ -40,6 +40,10 @@ namespace leveldb {
 
 const int kNumNonTableCacheFiles = 10;
 
+#ifdef LDB_DELAYED_SYNC
+std::vector<WritableFile*> g_sync_list;
+#endif
+
 // Information kept for every waiting writer
 struct DBImpl::Writer {
   explicit Writer(port::Mutex* mu)
@@ -171,10 +175,16 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
 DBImpl::~DBImpl() {
   // Wait for background work to finish.
   mutex_.Lock();
+
   shutting_down_.store(true, std::memory_order_release);
   while (background_compaction_scheduled_) {
     background_work_finished_signal_.Wait();
   }
+
+#ifdef LDB_DELAYED_SYNC
+  g_sync_list.clear();
+#endif
+
   mutex_.Unlock();
 
   if (db_lock_ != nullptr) {
@@ -557,10 +567,22 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
 
   mutex_.Unlock();
   for (int i = 0; i < wfs.size(); i++) {
-    WritableFile* wf = wfs[i];
-    while (wf->CheckSync() == false);
-    wf->Close();
-    delete wf;
+    WritableFile* wfile = wfs[i];
+#ifdef LDB_DELAYED_SYNC
+    g_sync_list.push_back(wfile);
+    wfile->Close();
+    if (g_sync_list.size() == LDB_DELAYED_SYNC) {
+      for (WritableFile* wf : g_sync_list) {
+        while (wf->CheckSync() == false);
+        delete wf;
+      }
+      g_sync_list.clear();
+    }
+#else
+    while (wfile->CheckSync() == false);
+    wfile->Close();
+    delete wfile;
+#endif
     Iterator* it = table_cache_->NewIterator(ReadOptions(), fnums[i], fsizes[i]);
     s = it->status();
     delete it;
@@ -1081,6 +1103,17 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     WritableFile* wfile = compact->writable_files[i];
     Status s;
 
+#ifdef LDB_DELAYED_SYNC
+    g_sync_list.push_back(wfile);
+    wfile->Close();
+    if (g_sync_list.size() == LDB_DELAYED_SYNC) {
+      for (WritableFile* wf : g_sync_list) {
+        while (wf->CheckSync() == false);
+        delete wf;
+      }
+      g_sync_list.clear();
+    }
+#else
     while (wfile->CheckSync() == false);
     s = wfile->Close();
     if (!s.ok()) {
@@ -1088,6 +1121,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
       exit(1);
     }
     delete wfile;
+#endif
 
     const uint64_t output_number = compact->outputs[i].number;
     const uint64_t current_bytes = compact->outputs[i].file_size;
