@@ -128,10 +128,10 @@ struct spdk_nvme_obj_cmd {
   } dptr;
 
   /* dword 10 */
-  uint32_t blkno;
+  uint32_t objno;
 
   /* dowrd 11 */
-  uint32_t cdw11;
+  uint32_t offset;
 
   /* dword 12-15 */
   uint32_t sect_cnt;
@@ -302,7 +302,7 @@ void obj_read_complete(void* arg, const struct spdk_nvme_cpl* completion)
 }
 
 void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                        void* buf, uint32_t blkno, uint32_t cnt, int* chk_compl)
+                        void* buf, uint32_t objno, uint32_t offset, uint32_t cnt, int* chk_compl)
 {
   int rc;
   uint64_t paddr = spdk_vtophys(buf, NULL);
@@ -311,7 +311,8 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
   obj_cmd.opc = SPDK_NVME_OPC_COSMOS_WRITE;
   obj_cmd.buf_addr_lo = (paddr & 0xFFFFFFFFULL);
   obj_cmd.buf_addr_hi = (paddr >> 32);
-  obj_cmd.blkno = blkno;
+  obj_cmd.objno = objno;
+  obj_cmd.offset = offset;
   obj_cmd.sect_cnt = cnt - 1;
 
   struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&obj_cmd);
@@ -338,7 +339,7 @@ void obj_write_from_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* q
 }
 
 void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair,
-                       void* buf, uint32_t blkno, uint32_t cnt, int* chk_compl)
+                     void* buf, uint32_t objno, uint32_t offset, uint32_t cnt, int* chk_compl)
 {
   int rc;
 
@@ -348,7 +349,8 @@ void obj_read_to_buf(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpai
   obj_cmd.opc = SPDK_NVME_OPC_COSMOS_READ;
   obj_cmd.buf_addr_lo = (paddr & 0xFFFFFFFFULL);
   obj_cmd.buf_addr_hi = (paddr >> 32);
-  obj_cmd.blkno = blkno;
+  obj_cmd.objno = objno;
+  obj_cmd.offset = offset;
   obj_cmd.sect_cnt = cnt - 1;
 
   struct spdk_nvme_cmd* nvme_cmd = reinterpret_cast<struct spdk_nvme_cmd*>(&obj_cmd);
@@ -710,15 +712,33 @@ class ObjSequentialFile final : public SequentialFile {
     struct ns_entry* ns_ent = g_namespaces;
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
-
     uint32_t left = size_;
+    int compl_cnt = 0;
+    int issued_writes = 0;
     for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
       char* target_buf = buf_ + i * OBJ_SIZE;
       int target_idx = idx_ * OBJ_PER_SST + i;
       int cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
-      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, cnt, nullptr);
+      left -= cnt * SECT_SIZE;
+#ifdef LDB_CMD_MAX_SECT
+      int cmd_cnt = DIV_ROUND_UP(cnt, LDB_CMD_MAX_SECT);
+      for (int j = 0; j < cmd_cnt; j++) {
+        char* sub_target_buf = target_buf + j * SECT_SIZE * LDB_CMD_MAX_SECT;
+        uint32_t sub_lba = j * LDB_CMD_MAX_SECT;
+        uint32_t sub_cnt = (j == cmd_cnt - 1) ? (cnt - 1) % LDB_CMD_MAX_SECT + 1 : LDB_CMD_MAX_SECT;
+        obj_read_to_buf(ctrlr, qpair, sub_target_buf, target_idx, sub_lba, sub_cnt, &compl_cnt);
+        issued_writes++;
+      }
+#else
+      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, 0, cnt, &compl_cnt);
+      issued_writes++;
+#endif
+    }
+    while (compl_cnt < issued_writes) {
+      check_completion(qpair);
     }
   }
+
   ~ObjSequentialFile() override {
     spdk_free(buf_);
   }
@@ -783,11 +803,29 @@ class ObjRandomAccessFile final : public RandomAccessFile {
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
     uint32_t left = size_;
+    int compl_cnt = 0;
+    int issued_writes = 0;
     for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
       char* target_buf = buf_ + i * OBJ_SIZE;
       int target_idx = idx_ * OBJ_PER_SST + i;
       int cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
-      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, cnt, nullptr);
+      left -= cnt * SECT_SIZE;
+#ifdef LDB_CMD_MAX_SECT
+      int cmd_cnt = DIV_ROUND_UP(cnt, LDB_CMD_MAX_SECT);
+      for (int j = 0; j < cmd_cnt; j++) {
+        char* sub_target_buf = target_buf + j * SECT_SIZE * LDB_CMD_MAX_SECT;
+        uint32_t sub_lba = j * LDB_CMD_MAX_SECT;
+        uint32_t sub_cnt = (j == cmd_cnt - 1) ? (cnt - 1) % LDB_CMD_MAX_SECT + 1 : LDB_CMD_MAX_SECT;
+        obj_read_to_buf(ctrlr, qpair, sub_target_buf, target_idx, sub_lba, sub_cnt, &compl_cnt);
+        issued_writes++;
+      }
+#else
+      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, 0, cnt, &compl_cnt);
+      issued_writes++;
+#endif
+    }
+    while (compl_cnt < issued_writes) {
+      check_completion(qpair);
     }
   }
 
@@ -826,11 +864,29 @@ class ObjWritableFile final : public WritableFile {
     struct spdk_nvme_ctrlr* ctrlr = ns_ent->ctrlr;
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
     uint32_t left = size_;
+    int compl_cnt = 0;
+    int issued_writes = 0;
     for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
       char* target_buf = buf_ + i * OBJ_SIZE;
       int target_idx = idx_ * OBJ_PER_SST + i;
       int cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
-      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, cnt, nullptr);
+      left -= cnt * SECT_SIZE;
+#ifdef LDB_CMD_MAX_SECT
+      int cmd_cnt = DIV_ROUND_UP(cnt, LDB_CMD_MAX_SECT);
+      for (int j = 0; j < cmd_cnt; j++) {
+        char* sub_target_buf = target_buf + j * SECT_SIZE * LDB_CMD_MAX_SECT;
+        uint32_t sub_lba = j * LDB_CMD_MAX_SECT;
+        uint32_t sub_cnt = (j == cmd_cnt - 1) ? (cnt - 1) % LDB_CMD_MAX_SECT + 1 : LDB_CMD_MAX_SECT;
+        obj_read_to_buf(ctrlr, qpair, sub_target_buf, target_idx, sub_lba, sub_cnt, &compl_cnt);
+        issued_writes++;
+      }
+#else
+      obj_read_to_buf(ctrlr, qpair, target_buf, target_idx, 0, cnt, &compl_cnt);
+      issued_writes++;
+#endif
+    }
+    while (compl_cnt < issued_writes) {
+      check_completion(qpair);
     }
   }
 
@@ -891,14 +947,27 @@ class ObjWritableFile final : public WritableFile {
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
 
     uint32_t left = size_;
-    int i;
-    for (i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+    issued_writes_ = 0;
+    for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
       char* target_buf = buf_ + i * OBJ_SIZE;
       int target_idx = idx_ * OBJ_PER_SST + i;
       uint32_t cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
-      obj_write_from_buf(ctrlr, qpair, target_buf, target_idx, cnt, &compl_status_);
+      left -= cnt * SECT_SIZE;
+#ifdef LDB_CMD_MAX_SECT
+      int cmd_cnt = DIV_ROUND_UP(cnt, LDB_CMD_MAX_SECT);
+      for (int j = 0; j < cmd_cnt; j++) {
+        char* sub_target_buf = target_buf + j * SECT_SIZE * LDB_CMD_MAX_SECT;
+        uint32_t sub_lba = j * LDB_CMD_MAX_SECT;
+        uint32_t sub_cnt = (j == cmd_cnt - 1) ? (cnt - 1) % LDB_CMD_MAX_SECT + 1 : LDB_CMD_MAX_SECT;
+        obj_write_from_buf(ctrlr, qpair, sub_target_buf, target_idx, sub_lba,
+                           sub_cnt, &compl_status_);
+        issued_writes_++;
+      }
+#else
+      obj_write_from_buf(ctrlr, qpair, target_buf, target_idx, 0, cnt, &compl_status_);
+      issued_writes_++;
+#endif
     }
-    issued_writes_ = i;
     while (compl_status_ < issued_writes_) {
       check_completion(qpair);
     }
@@ -912,14 +981,27 @@ class ObjWritableFile final : public WritableFile {
     struct spdk_nvme_qpair* qpair = tinfo.qpair;
 
     uint32_t left = size_;
-    int i;
-    for (i = 0; left > 0 && i < OBJ_PER_SST; i++) {
+    issued_writes_ = 0;
+    for (int i = 0; left > 0 && i < OBJ_PER_SST; i++) {
       char* target_buf = buf_ + i * OBJ_SIZE;
       int target_idx = idx_ * OBJ_PER_SST + i;
       uint32_t cnt = DIV_ROUND_UP(std::min(left, (uint32_t)OBJ_SIZE), SECT_SIZE);
-      obj_write_from_buf(ctrlr, qpair, target_buf, target_idx, cnt, &compl_status_);
+      left -= cnt * SECT_SIZE;
+#ifdef LDB_CMD_MAX_SECT
+      int cmd_cnt = DIV_ROUND_UP(cnt, LDB_CMD_MAX_SECT);
+      for (int j = 0; j < cmd_cnt; j++) {
+        char* sub_target_buf = target_buf + j * SECT_SIZE * LDB_CMD_MAX_SECT;
+        uint32_t sub_lba = j * LDB_CMD_MAX_SECT;
+        uint32_t sub_cnt = (j == cmd_cnt - 1) ? (cnt - 1) % LDB_CMD_MAX_SECT + 1 : LDB_CMD_MAX_SECT;
+        obj_write_from_buf(ctrlr, qpair, sub_target_buf, target_idx, sub_lba,
+                           sub_cnt, &compl_status_);
+        issued_writes_++;
+      }
+#else
+      obj_write_from_buf(ctrlr, qpair, target_buf, target_idx, 0, cnt, &compl_status_);
+      issued_writes_++;
+#endif
     }
-    issued_writes_ = i;
     return Status::OK();
   }
 
