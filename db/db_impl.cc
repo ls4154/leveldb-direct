@@ -571,7 +571,11 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
 #ifdef LDB_DELAYED_SYNC
     g_sync_list.push_back(wfile);
     wfile->Close();
+#if LDB_DELAYED_WAIT_COMP
+    if (g_sync_list.size() >= LDB_DELAYED_SYNC && i == wfs.size() - 1) {
+#else
     if (g_sync_list.size() == LDB_DELAYED_SYNC) {
+#endif
       for (WritableFile* wf : g_sync_list) {
         while (wf->CheckSync() == false);
         delete wf;
@@ -1106,7 +1110,11 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 #ifdef LDB_DELAYED_SYNC
     g_sync_list.push_back(wfile);
     wfile->Close();
+#if LDB_DELAYED_WAIT_COMP
+    if (g_sync_list.size() >= LDB_DELAYED_SYNC && i == compact->writable_files.size() - 1) {
+#else
     if (g_sync_list.size() == LDB_DELAYED_SYNC) {
+#endif
       for (WritableFile* wf : g_sync_list) {
         while (wf->CheckSync() == false);
         delete wf;
