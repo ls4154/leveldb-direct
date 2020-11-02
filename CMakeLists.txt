@@ -267,6 +267,21 @@ target_link_libraries(leveldbutil leveldb
   -lnuma -ldl -L$ENV{HOME}/spdk/isa-l/.libs -lrt -luuid -lcrypto -laio
 )
 
+add_executable(dumpsb
+  "${PROJECT_SOURCE_DIR}/db/dumpsb.cc"
+)
+
+target_link_libraries(dumpsb leveldb
+  -Wl,-rpath,$ENV{HOME}/spdk/build/lib:$ENV{HOME}/spdk/dpdk/build/lib -L$ENV{HOME}/spdk/build/lib  -L$ENV{HOME}/spdk/dpdk/build/lib -pthread
+  -Wl,--whole-archive -Wl,--no-as-needed -lspdk_sock_posix -lspdk_nvme -lspdk_thread -lspdk_util -lspdk_log -lspdk_sock -lspdk_vmd -Wl,--no-whole-archive
+  $ENV{HOME}/spdk/build/lib/libspdk_env_dpdk.a
+  -Wl,--whole-archive,--no-as-needed $ENV{HOME}/spdk/dpdk/build/lib/librte_eal.a $ENV{HOME}/spdk/dpdk/build/lib/librte_mempool.a $ENV{HOME}/spdk/dpdk/build/lib/librte_ring.a
+  $ENV{HOME}/spdk/dpdk/build/lib/librte_mbuf.a $ENV{HOME}/spdk/dpdk/build/lib/librte_mempool_ring.a $ENV{HOME}/spdk/dpdk/build/lib/librte_pci.a
+  $ENV{HOME}/spdk/dpdk/build/lib/librte_bus_pci.a $ENV{HOME}/spdk/dpdk/build/lib/librte_kvargs.a $ENV{HOME}/spdk/dpdk/build/lib/librte_vhost.a
+  $ENV{HOME}/spdk/dpdk/build/lib/librte_net.a $ENV{HOME}/spdk/dpdk/build/lib/librte_cryptodev.a $ENV{HOME}/spdk/dpdk/build/lib/librte_hash.a -Wl,--no-whole-archive
+  -lnuma -ldl -L$ENV{HOME}/spdk/isa-l/.libs -lrt -luuid -lcrypto -laio
+)
+
 target_link_libraries(leveldb
   spdk_nvme spdk_thread spdk_util spdk_log spdk_sock spdk_vmd spdk_env_dpdk
   dpdk rte_bus_pci rte_bus_vdev rte_cmdline rte_compressdev rte_cryptodev rte_eal rte_ethdev
