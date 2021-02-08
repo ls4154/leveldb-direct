@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <assert.h>
 #include <stdint.h>
@@ -39,7 +38,8 @@ public:
   ~MyCompaction();
   bool DoCompaction();
   bool MakeResultInfo(std::string output_name);
-  void PrintOutputInfo();
+  void PrintInputInfo();
+  void PrintResultInfo();
 private:
   Iterator* MakeInputIterator();
 
@@ -55,8 +55,6 @@ private:
   InternalKeyComparator* icmp_;
   TableCache* table_cache_;
 };
-
-
 
 class FileNumIterator : public Iterator {
  public:
@@ -125,6 +123,7 @@ MyCompaction::MyCompaction(Env* env, std::string&db_name, int level,
   env_ = env;
   opts_ = new Options;
   dbname_ = db_name;
+  level_ = level;
   icmp_ = new InternalKeyComparator(opts_->comparator);
   table_cache_ = new TableCache(dbname_, *opts_, 100);
   smallest_snapshot_ = seqnum;
@@ -132,14 +131,11 @@ MyCompaction::MyCompaction(Env* env, std::string&db_name, int level,
 
   opts_->comparator = icmp_;
 
-  fprintf(stderr, "Inputs (Level %d)\n", level);
   for (std::string& s : in_files) {
     uint64_t fnum;
     uint64_t fsize;
     FileType ftype;
 
-    fprintf(stderr, "%s ", s.c_str());
-
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
 
@@ -156,24 +152,19 @@ MyCompaction::MyCompaction(Env* env, std::string&db_name, int level,
     Slice key = titer->key();
     InternalKey ik_smallest;
     ik_smallest.DecodeFrom(key);
-    fprintf(stderr, " %s .. ", ik_smallest.user_key().ToString().c_str());
 
     titer->SeekToLast();
     key = titer->key();
     InternalKey ik_largest;
     ik_largest.DecodeFrom(key);
-    fprintf(stderr, "%s\n", ik_largest.user_key().ToString().c_str());
 
     inputs_[0].push_back({fnum, fsize, ik_smallest, ik_largest});
   }
-  fprintf(stderr, "Inputs (Level %d)\n", level + 1);
   for (std::string& s : in_files2) {
     uint64_t fnum;
     uint64_t fsize;
     FileType ftype;
 
-    fprintf(stderr, " %s ", s.c_str());
-
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
 
@@ -190,29 +181,23 @@ MyCompaction::MyCompaction(Env* env, std::string&db_name, int level,
     Slice key = titer->key();
     InternalKey ik_smallest;
     ik_smallest.DecodeFrom(key);
-    fprintf(stderr, " %s .. ", ik_smallest.user_key().ToString().c_str());
 
     titer->SeekToLast();
     key = titer->key();
     InternalKey ik_largest;
     ik_largest.DecodeFrom(key);
-    fprintf(stderr, "%s\n", ik_largest.user_key().ToString().c_str());
 
     inputs_[1].push_back({fnum, fsize, ik_smallest, ik_largest});
   }
-  fprintf(stderr, "Outputs\n");
   for (std::string& s : out_files) {
     uint64_t fnum;
     uint64_t fsize;
     FileType ftype;
 
-    fprintf(stderr, " %s\n", s.c_str());
-
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
 
     fsize = 0;
-
     outputs_.push_back({fnum, fsize, InternalKey(), InternalKey()});
   }
 }
@@ -446,14 +431,39 @@ bool MyCompaction::MakeResultInfo(std::string output_name) {
   return true;
 }
 
-void MyCompaction::PrintOutputInfo() {
-  for (TableMeta& tm : outputs_) {
-    if (tm.file_size == 0) {
+void MyCompaction::PrintInputInfo() {
+  int l = level_;
+  for (std::vector<TableMeta>& inputs : inputs_) {
+    fprintf(stderr, "Input files Level %d\n", l++);
+    for (TableMeta& tbl : inputs) {
+      if (tbl.file_size == 0) {
+        continue;
+      }
+    fprintf(stderr, " %llu: %s .. %s: %lluB\n",
+        static_cast<unsigned long long>(tbl.number),
+        tbl.smallest.user_key().ToString().c_str(),
+        tbl.largest.user_key().ToString().c_str(),
+        static_cast<unsigned long long>(tbl.file_size));
+    }
+  }
+  fprintf(stderr, "Output file numbers\n");
+  for (TableMeta& tbl : outputs_) {
+    fprintf(stderr, " %llu\n",
+        static_cast<unsigned long long>(tbl.number));
+  }
+}
+
+void MyCompaction::PrintResultInfo() {
+  fprintf(stderr, "Compaction outputs\n");
+  for (TableMeta& tbl : outputs_) {
+    if (tbl.file_size == 0) {
       continue;
     }
-    fprintf(stderr, "File %llu %s .. %s\n", static_cast<unsigned long long>(tm.number),
-                                            tm.smallest.user_key().ToString().c_str(),
-                                            tm.largest.user_key().ToString().c_str());
+    fprintf(stderr, " %llu: %s .. %s: %lluB\n",
+        static_cast<unsigned long long>(tbl.number),
+        tbl.smallest.user_key().ToString().c_str(),
+        tbl.largest.user_key().ToString().c_str(),
+        static_cast<unsigned long long>(tbl.file_size));
   }
 }
 
@@ -466,7 +476,7 @@ Status CompactSST(Env* env, std::string&db_name, int level,
                   uint64_t seqnum, uint64_t max_file_size) {
   MyCompaction comp(env, db_name, level, in_files, in_files2,
                     out_files, seqnum, max_file_size);
-
+  comp.PrintInputInfo();
   uint64_t start_time = env->NowMicros();
   bool ok = comp.DoCompaction();
   uint64_t finish_time = env->NowMicros();
@@ -477,7 +487,7 @@ Status CompactSST(Env* env, std::string&db_name, int level,
   if (!ok) {
     return Status::InvalidArgument("Make result error");
   }
-  comp.PrintOutputInfo();
+  comp.PrintResultInfo();
   fprintf(stderr, "Compaction time %lld us\n",
           static_cast<long long>(finish_time - start_time));
 
