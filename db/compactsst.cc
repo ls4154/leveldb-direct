@@ -29,19 +29,34 @@ struct TableMeta {
   InternalKey smallest, largest;
 };
 
-struct CompactionInfo {
-  Env* env;
-  Options* opts;
-  std::string dbname;
-  int level;
-  std::vector<TableMeta> inputs[2];
-  std::vector<TableMeta> outputs;
-  uint32_t out_cnt;
-  SequenceNumber smallest_snapshot;
-  uint64_t max_output_file_size;
-  InternalKeyComparator* icmp;
-  TableCache* table_cache;
+class MyCompaction {
+public:
+  MyCompaction(Env* env, std::string&db_name, int level,
+               std::vector<std::string>& in_files,
+               std::vector<std::string>& in_files2,
+               std::vector<std::string>& out_files,
+               uint64_t seqnum, uint64_t max_file_size);
+  ~MyCompaction();
+  bool DoCompaction();
+  bool MakeResultInfo(std::string output_name);
+  void PrintOutputInfo();
+private:
+  Iterator* MakeInputIterator();
+
+  Env* env_;
+  Options* opts_;
+  std::string dbname_;
+  int level_;
+  std::vector<TableMeta> inputs_[2];
+  std::vector<TableMeta> outputs_;
+  uint32_t out_cnt_;
+  SequenceNumber smallest_snapshot_;
+  uint64_t max_output_file_size_;
+  InternalKeyComparator* icmp_;
+  TableCache* table_cache_;
 };
+
+
 
 class FileNumIterator : public Iterator {
  public:
@@ -100,129 +115,25 @@ Iterator* GetFileIterator(void* arg, const ReadOptions& options,
   }
 }
 
-Iterator* MakeInputIterator(CompactionInfo* c) {
+MyCompaction::MyCompaction(Env* env, std::string&db_name, int level,
+                           std::vector<std::string>& in_files,
+                           std::vector<std::string>& in_files2,
+                           std::vector<std::string>& out_files,
+                           uint64_t seqnum, uint64_t max_file_size) {
   ReadOptions ropts;
 
-  const int space = c->level == 0 ? c->inputs[0].size() + 1: 2;
-  Iterator** iter_list = new Iterator*[space];
-  int num = 0;
+  env_ = env;
+  opts_ = new Options;
+  dbname_ = db_name;
+  icmp_ = new InternalKeyComparator(opts_->comparator);
+  table_cache_ = new TableCache(dbname_, *opts_, 100);
+  smallest_snapshot_ = seqnum;
+  max_output_file_size_ = max_file_size;
 
-  for (int which = 0; which < 2; which++) {
-    if (!c->inputs[which].empty()) {
-      if (c->level + which == 0) {
-        const std::vector<TableMeta>& files = c->inputs[which];
-        for (size_t i = 0; i < files.size(); i++) {
-          iter_list[num++] = c->table_cache->NewIterator(ropts, files[i].number,
-                                                         files[i].file_size);
-        }
-      } else {
-        iter_list[num++] = NewTwoLevelIterator(
-            new FileNumIterator(*c->icmp, &c->inputs[which]),
-            &GetFileIterator, c->table_cache, ropts);
-      }
-    }
-  }
-  assert(num <= space);
-  Iterator* result = NewMergingIterator(c->icmp, iter_list, num);
-  delete[] iter_list;
-  return result;
-}
+  opts_->comparator = icmp_;
 
-CompactionInfo* MakeCompactionInfo(Env* env, std::string&dbname, int level,
-                                            std::vector<std::string>& in_files,
-                                            std::vector<std::string>& in_files2,
-                                            std::vector<std::string>& out_files,
-                                            uint64_t seqnum, uint64_t max_file_size) {
-  CompactionInfo* ci = new CompactionInfo;
-
-  ReadOptions ropts;
-
-  ci->env = env;
-  ci->opts = new Options;
-  ci->dbname = dbname;
-  ci->icmp = new InternalKeyComparator(ci->opts->comparator);
-  ci->table_cache = new TableCache(ci->dbname, *ci->opts, 100);
-  ci->smallest_snapshot = seqnum;
-  ci->max_output_file_size = max_file_size;
-
-  ci->opts->comparator = ci->icmp;
-
-  fprintf(stderr, "Level %d: ", level);
+  fprintf(stderr, "Inputs (Level %d)\n", level);
   for (std::string& s : in_files) {
-    uint64_t fnum;
-    uint64_t fsize;
-    FileType ftype;
-
-    fprintf(stderr, "%s", s.c_str());
-
-    ParseFileName(s, &fnum, &ftype);
-    assert(ftype == kTableFile);
-
-    std::string fname = TableFileName(ci->dbname, fnum);
-    Status status = ci->env->GetFileSize(fname, &fsize);
-    if (!status.ok()) {
-      fprintf(stderr, "\n%s not exists\n", fname.c_str());
-      exit(1);
-    }
-
-    Iterator* titer = ci->table_cache->NewIterator(ropts, fnum, fsize);
-
-    titer->SeekToFirst();
-    Slice key = titer->key();
-    // ParsedInternalKey ikey;
-    // if (!ParseInternalKey(key, &ikey)) {
-    //   assert(0);
-    // }
-    InternalKey ik_smallest;
-    ik_smallest.DecodeFrom(key);
-    fprintf(stderr, "[%s,", ik_smallest.user_key().ToString().c_str());
-
-    titer->SeekToLast();
-    key = titer->key();
-    InternalKey ik_largest;
-    ik_largest.DecodeFrom(key);
-    fprintf(stderr, "%s] ", ik_largest.user_key().ToString().c_str());
-
-    ci->inputs[0].push_back({fnum, fsize, ik_smallest, ik_largest});
-  }
-  fprintf(stderr, "\n"
-                  "Level %d: ", level + 1);
-  for (std::string& s : in_files2) {
-    uint64_t fnum;
-    uint64_t fsize;
-    FileType ftype;
-
-    fprintf(stderr, "%s", s.c_str());
-
-    ParseFileName(s, &fnum, &ftype);
-    assert(ftype == kTableFile);
-
-    std::string fname = TableFileName(ci->dbname, fnum);
-    Status status = ci->env->GetFileSize(fname, &fsize);
-    if (!status.ok()) {
-      fprintf(stderr, "\n%s not exists\n", fname.c_str());
-      exit(1);
-    }
-
-    Iterator* titer = ci->table_cache->NewIterator(ropts, fnum, fsize);
-
-    titer->SeekToFirst();
-    Slice key = titer->key();
-    InternalKey ik_smallest;
-    ik_smallest.DecodeFrom(key);
-    fprintf(stderr, "[%s,", ik_smallest.user_key().ToString().c_str());
-
-    titer->SeekToLast();
-    key = titer->key();
-    InternalKey ik_largest;
-    ik_largest.DecodeFrom(key);
-    fprintf(stderr, "%s] ", ik_largest.user_key().ToString().c_str());
-
-    ci->inputs[1].push_back({fnum, fsize, ik_smallest, ik_largest});
-  }
-  fprintf(stderr, "\n");
-  fprintf(stderr, "Outputs: ");
-  for (std::string& s : out_files) {
     uint64_t fnum;
     uint64_t fsize;
     FileType ftype;
@@ -232,19 +143,116 @@ CompactionInfo* MakeCompactionInfo(Env* env, std::string&dbname, int level,
     ParseFileName(s, &fnum, &ftype);
     assert(ftype == kTableFile);
 
+    std::string fname = TableFileName(dbname_, fnum);
+    Status status = env_->GetFileSize(fname, &fsize);
+    if (!status.ok()) {
+      fprintf(stderr, "\n%s not exists\n", fname.c_str());
+      exit(1);
+    }
+
+    Iterator* titer = table_cache_->NewIterator(ropts, fnum, fsize);
+
+    titer->SeekToFirst();
+    Slice key = titer->key();
+    InternalKey ik_smallest;
+    ik_smallest.DecodeFrom(key);
+    fprintf(stderr, " %s .. ", ik_smallest.user_key().ToString().c_str());
+
+    titer->SeekToLast();
+    key = titer->key();
+    InternalKey ik_largest;
+    ik_largest.DecodeFrom(key);
+    fprintf(stderr, "%s\n", ik_largest.user_key().ToString().c_str());
+
+    inputs_[0].push_back({fnum, fsize, ik_smallest, ik_largest});
+  }
+  fprintf(stderr, "Inputs (Level %d)\n", level + 1);
+  for (std::string& s : in_files2) {
+    uint64_t fnum;
+    uint64_t fsize;
+    FileType ftype;
+
+    fprintf(stderr, " %s ", s.c_str());
+
+    ParseFileName(s, &fnum, &ftype);
+    assert(ftype == kTableFile);
+
+    std::string fname = TableFileName(dbname_, fnum);
+    Status status = env_->GetFileSize(fname, &fsize);
+    if (!status.ok()) {
+      fprintf(stderr, "\n%s not exists\n", fname.c_str());
+      exit(1);
+    }
+
+    Iterator* titer = table_cache_->NewIterator(ropts, fnum, fsize);
+
+    titer->SeekToFirst();
+    Slice key = titer->key();
+    InternalKey ik_smallest;
+    ik_smallest.DecodeFrom(key);
+    fprintf(stderr, " %s .. ", ik_smallest.user_key().ToString().c_str());
+
+    titer->SeekToLast();
+    key = titer->key();
+    InternalKey ik_largest;
+    ik_largest.DecodeFrom(key);
+    fprintf(stderr, "%s\n", ik_largest.user_key().ToString().c_str());
+
+    inputs_[1].push_back({fnum, fsize, ik_smallest, ik_largest});
+  }
+  fprintf(stderr, "Outputs\n");
+  for (std::string& s : out_files) {
+    uint64_t fnum;
+    uint64_t fsize;
+    FileType ftype;
+
+    fprintf(stderr, " %s\n", s.c_str());
+
+    ParseFileName(s, &fnum, &ftype);
+    assert(ftype == kTableFile);
+
     fsize = 0;
 
-    ci->outputs.push_back({fnum, fsize, InternalKey(), InternalKey()});
+    outputs_.push_back({fnum, fsize, InternalKey(), InternalKey()});
   }
-  fprintf(stderr, "\n");
-
-  return ci;
 }
 
-bool DoCompaction(CompactionInfo* ci) {
-  Env* env = ci->env;
+MyCompaction::~MyCompaction() {
+  delete opts_;
+  delete icmp_;
+  delete table_cache_;
+}
 
-  Iterator* input = MakeInputIterator(ci);
+Iterator* MyCompaction::MakeInputIterator() {
+  ReadOptions ropts;
+
+  const int space = level_ == 0 ? inputs_[0].size() + 1: 2;
+  Iterator** iter_list = new Iterator*[space];
+  int num = 0;
+
+  for (int which = 0; which < 2; which++) {
+    if (!inputs_[which].empty()) {
+      if (level_ + which == 0) {
+        const std::vector<TableMeta>& files = inputs_[which];
+        for (size_t i = 0; i < files.size(); i++) {
+          iter_list[num++] = table_cache_->NewIterator(ropts, files[i].number,
+                                                       files[i].file_size);
+        }
+      } else {
+        iter_list[num++] = NewTwoLevelIterator(
+            new FileNumIterator(*icmp_, &inputs_[which]),
+            &GetFileIterator, table_cache_, ropts);
+      }
+    }
+  }
+  assert(num <= space);
+  Iterator* result = NewMergingIterator(icmp_, iter_list, num);
+  delete[] iter_list;
+  return result;
+}
+
+bool MyCompaction::DoCompaction() {
+  Iterator* input = MakeInputIterator();
   TableBuilder* builder = nullptr;
   WritableFile* outfile = nullptr;
   TableMeta* cur_output = nullptr;
@@ -258,7 +266,7 @@ bool DoCompaction(CompactionInfo* ci) {
   bool has_current_user_key = false;
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
 
-  const Comparator* ucmp = ci->icmp->user_comparator();
+  const Comparator* ucmp = icmp_->user_comparator();
 
   for (; input->Valid();) {
     Slice key = input->key();
@@ -280,7 +288,7 @@ bool DoCompaction(CompactionInfo* ci) {
         last_sequence_for_key = kMaxSequenceNumber;
       }
 
-      if (last_sequence_for_key <= ci->smallest_snapshot) {
+      if (last_sequence_for_key <= smallest_snapshot_) {
         // Hidden by an newer entry for same user key
         drop = true;  // (A)
       }
@@ -291,19 +299,19 @@ bool DoCompaction(CompactionInfo* ci) {
 
     if (!drop) {
       if (builder == nullptr) {
-        if (out_cnt == ci->outputs.size()) {
+        if (out_cnt == outputs_.size()) {
           fprintf(stderr, "Out of output files\n");
           exit(1);
         }
-        cur_output = &ci->outputs[out_cnt++];
+        cur_output = &outputs_[out_cnt++];
         uint64_t fnum = cur_output->number;
-        std::string fname = TableFileName(ci->dbname, fnum);
-        status = env->NewWritableFile(fname, &outfile);
+        std::string fname = TableFileName(dbname_, fnum);
+        status = env_->NewWritableFile(fname, &outfile);
         if (!status.ok()) {
           fprintf(stderr, "NewWritableFile error %s\n", fname.c_str());
           exit(1);
         }
-        builder = new TableBuilder(*ci->opts, outfile);
+        builder = new TableBuilder(*opts_, outfile);
       }
       if (builder->NumEntries() == 0) {
         cur_output->smallest.DecodeFrom(key);
@@ -311,7 +319,7 @@ bool DoCompaction(CompactionInfo* ci) {
       cur_output->largest.DecodeFrom(key);
       builder->Add(key, input->value());
 
-      if (builder->FileSize() >= ci->max_output_file_size) {
+      if (builder->FileSize() >= max_output_file_size_) {
         status = input->status();
         if (!status.ok()) {
           fprintf(stderr, "iterator error\n");
@@ -384,12 +392,12 @@ bool DoCompaction(CompactionInfo* ci) {
 
     // TODO verify table
     fprintf(stderr, "Generated table %llu, %llu keys, %llu bytes\n",
-        static_cast<unsigned long long>(cur_output->number),
-        static_cast<unsigned long long>(num_entries),
-        static_cast<unsigned long long>(file_size));
+                    static_cast<unsigned long long>(cur_output->number),
+                    static_cast<unsigned long long>(num_entries),
+                    static_cast<unsigned long long>(file_size));
   }
 
-  ci->out_cnt = out_cnt;
+  out_cnt_ = out_cnt;
 
   delete input;
   input = nullptr;
@@ -397,17 +405,16 @@ bool DoCompaction(CompactionInfo* ci) {
   return true;
 }
 
-bool MakeResultInfo(CompactionInfo* ci, std::string output_name) {
-  Env* env = ci->env;
+bool MyCompaction::MakeResultInfo(std::string output_name) {
   WritableFile* outfile = nullptr;
-  Status status = env->NewWritableFile(ci->dbname + "/" + output_name, &outfile);
+  Status status = env_->NewWritableFile(dbname_ + "/" + output_name, &outfile);
   if (!status.ok()) {
     fprintf(stderr, "NewWritableFile error %s\n", output_name.c_str());
     exit(1);
   }
 
-  outfile->Append(Slice(reinterpret_cast<char*>(&ci->out_cnt), sizeof(uint32_t)));
-  for (TableMeta& tm : ci->outputs) {
+  outfile->Append(Slice(reinterpret_cast<char*>(&out_cnt_), sizeof(uint32_t)));
+  for (TableMeta& tm : outputs_) {
     if (tm.file_size == 0) {
       continue;
     }
@@ -439,29 +446,8 @@ bool MakeResultInfo(CompactionInfo* ci, std::string output_name) {
   return true;
 }
 
-} // namespace
-
-Status CompactSST(Env* env, std::string&dbname, int level,
-                            std::vector<std::string>& in_files,
-                            std::vector<std::string>& in_files2,
-                            std::vector<std::string>& out_files,
-                            uint64_t seqnum, uint64_t max_file_size) {
-  CompactionInfo* ci = MakeCompactionInfo(env, dbname, level, in_files, in_files2,
-                                               out_files, seqnum, max_file_size);
-
-  uint64_t start_time = env->NowMicros();
-  bool ok = DoCompaction(ci);
-  uint64_t finish_time = env->NowMicros();
-  if (!ok) {
-    return Status::InvalidArgument("Compaction error");
-  }
-
-  ok = MakeResultInfo(ci, "compact.out");
-  if (!ok) {
-    return Status::InvalidArgument("Make result error");
-  }
-
-  for (TableMeta& tm : ci->outputs) {
+void MyCompaction::PrintOutputInfo() {
+  for (TableMeta& tm : outputs_) {
     if (tm.file_size == 0) {
       continue;
     }
@@ -469,7 +455,29 @@ Status CompactSST(Env* env, std::string&dbname, int level,
                                             tm.smallest.user_key().ToString().c_str(),
                                             tm.largest.user_key().ToString().c_str());
   }
+}
 
+} // namespace
+
+Status CompactSST(Env* env, std::string&db_name, int level,
+                  std::vector<std::string>& in_files,
+                  std::vector<std::string>& in_files2,
+                  std::vector<std::string>& out_files,
+                  uint64_t seqnum, uint64_t max_file_size) {
+  MyCompaction comp(env, db_name, level, in_files, in_files2,
+                    out_files, seqnum, max_file_size);
+
+  uint64_t start_time = env->NowMicros();
+  bool ok = comp.DoCompaction();
+  uint64_t finish_time = env->NowMicros();
+  if (!ok) {
+    return Status::InvalidArgument("Compaction error");
+  }
+  ok = comp.MakeResultInfo("compact.out");
+  if (!ok) {
+    return Status::InvalidArgument("Make result error");
+  }
+  comp.PrintOutputInfo();
   fprintf(stderr, "Compaction time %lld us\n",
           static_cast<long long>(finish_time - start_time));
 
