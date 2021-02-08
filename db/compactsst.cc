@@ -1,10 +1,7 @@
 
-#include <bits/stdint-uintn.h>
-#include <stdint.h>
-#include <cassert>
 #include <stdio.h>
-
-#include <sys/time.h>
+#include <assert.h>
+#include <stdint.h>
 
 #include "leveldb/compactsst.h"
 
@@ -452,10 +449,9 @@ Status CompactSST(Env* env, std::string&dbname, int level,
   CompactionInfo* ci = MakeCompactionInfo(env, dbname, level, in_files, in_files2,
                                                out_files, seqnum, max_file_size);
 
-  struct timeval tv1, tv2;
-  gettimeofday(&tv1, NULL);
+  uint64_t start_time = env->NowMicros();
   bool ok = DoCompaction(ci);
-  gettimeofday(&tv2, NULL);
+  uint64_t finish_time = env->NowMicros();
   if (!ok) {
     return Status::InvalidArgument("Compaction error");
   }
@@ -475,7 +471,7 @@ Status CompactSST(Env* env, std::string&dbname, int level,
   }
 
   fprintf(stderr, "Compaction time %lld us\n",
-          static_cast<long long>((tv2.tv_sec - tv1.tv_sec) * 1000000 + tv2.tv_usec - tv1.tv_usec));
+          static_cast<long long>(finish_time - start_time));
 
   return Status::OK();
 }
